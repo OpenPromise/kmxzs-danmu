@@ -92,12 +92,18 @@ class _LoginPageState extends State<LoginPage> {
 
   String _friendlyError(Object e) {
     if (e is ApiError) {
+      if (e.message.contains('证书')) return e.message;
       if (e.code == -1 || e.message.contains('连接') || e.message.contains('超时')) {
         return '无法连接服务器，请检查网络后重试';
       }
       return e.message;
     }
     final s = '$e';
+    if (s.contains('Handshake') ||
+        s.contains('CERTIFICATE') ||
+        s.contains('证书')) {
+      return '无法校验服务器证书，请安装最新版客户端';
+    }
     if (s.contains('Socket') || s.contains('连接') || s.contains('timeout')) {
       return '无法连接服务器，请检查网络后重试';
     }

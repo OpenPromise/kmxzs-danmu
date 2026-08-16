@@ -12,15 +12,18 @@ import 'package:kmxzs/config/app_config.dart';
 /// 打印告警；配置后不匹配的证书一律拒绝连接。
 abstract final class CertPinner {
   static bool accept(X509Certificate cert, String host, int port) {
-    final pin = AppConfig.certSha256.trim().toLowerCase().replaceAll(':', '');
-    if (pin.isEmpty) {
+    final rawPin = AppConfig.certSha256.trim();
+    if (rawPin.isEmpty) {
       debugPrint('[tls] KMXZS_CERT_SHA256 未配置，开发调试模式跳过证书绑定: $host');
       return true;
     }
+    // hex 大小写不敏感；base64 大小写敏感，必须保留原始形式比对
+    final pinHex = rawPin.toLowerCase().replaceAll(':', '');
+    final pinB64 = rawPin.replaceAll('=', '');
     final dig = sha256.convert(cert.der);
     final hex = dig.toString().toLowerCase();
-    final b64 = base64Encode(dig.bytes);
-    final ok = hex == pin || b64 == pin || b64.replaceAll('=', '') == pin;
+    final b64 = base64Encode(dig.bytes).replaceAll('=', '');
+    final ok = hex == pinHex || b64 == pinB64;
     if (!ok) {
       debugPrint(
         '[tls] 证书指纹不匹配，已拒绝连接: $host（subject=${cert.subject}）',

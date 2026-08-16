@@ -23,7 +23,7 @@ class Api {
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 20),
                 headers: {
-                  'User-Agent': 'zbxzs/1.0.5+6',
+                  'User-Agent': 'zbxzs/1.0.6+7',
                   'Accept': 'application/json',
                 },
               ),
@@ -93,8 +93,19 @@ class Api {
     }
     throw ApiError(
       e.response?.statusCode ?? -1,
-      e.message ?? '无法连接服务器，请检查网络后重试',
+      _networkErrorMessage(e),
     );
+  }
+
+  static String _networkErrorMessage(DioException e) {
+    final s = '${e.error ?? ''} ${e.message ?? ''}'.toLowerCase();
+    if (s.contains('handshake') ||
+        s.contains('certificate') ||
+        s.contains('tls') ||
+        s.contains('ssl')) {
+      return '无法校验服务器证书，请安装最新版客户端';
+    }
+    return e.message ?? '无法连接服务器，请检查网络后重试';
   }
 
   int get _signedNowMs =>
@@ -283,7 +294,7 @@ class Api {
     } on DioException catch (e) {
       throw ApiError(
         e.response?.statusCode ?? -1,
-        e.message ?? '无法连接服务器，请检查网络后重试',
+        _networkErrorMessage(e),
       );
     }
   }

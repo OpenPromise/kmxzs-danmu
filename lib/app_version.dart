@@ -1,7 +1,7 @@
 /// 与 pubspec.yaml version 的 name 段保持一致。
 class AppVersion {
-  static const String name = '1.0.5';
-  static const String build = '6';
+  static const String name = '1.0.6';
+  static const String build = '7';
   static const String display = '$name+$build';
 
   /// 将 1.2.3 转为可比较整数。

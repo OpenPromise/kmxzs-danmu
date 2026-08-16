@@ -30,10 +30,10 @@ foreach ($n in @('快马小助手', 'zbxzs', 'kmxzs')) {
 }
 
 flutter build windows --release --obfuscate --split-debug-info=build/debug-info `
-  --dart-define=KMXZS_API_BASE=$apiBase `
-  --dart-define=KMXZS_API_SECRET=$apiSecret `
-  --dart-define=KMXZS_CERT_SHA256=$certSha256 `
-  --dart-define=KMXZS_UPDATE_PUBKEY=$updatePubkey
+  --dart-define="KMXZS_API_BASE=$apiBase" `
+  --dart-define="KMXZS_API_SECRET=$apiSecret" `
+  --dart-define="KMXZS_CERT_SHA256=$certSha256" `
+  --dart-define="KMXZS_UPDATE_PUBKEY=$updatePubkey"
 if ($LASTEXITCODE -ne 0) { throw "flutter build failed" }
 
 $exe = Join-Path $root "build\windows\x64\runner\Release\快马小助手.exe"
