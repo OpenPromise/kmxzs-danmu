@@ -5,7 +5,16 @@ import 'package:crypto/crypto.dart';
 /// 客户端请求 HMAC 签名（与服务端 KMXZS_API_SECRET 成对）。
 abstract final class ApiSign {
   static String canonicalBody(Map<String, dynamic> body) {
-    const skip = {'sign', 'timestamp', 'nonce', 'deviceId', 'device_id'};
+    const skip = {
+      'sign',
+      'timestamp',
+      'nonce',
+      'deviceId',
+      'device_id',
+      // 阶段3：legacyDeviceId 仅用于服务端设备指纹迁移，不参与签名
+      'legacyDeviceId',
+      'legacy_device_id',
+    };
     final keys = body.keys.map((k) => k.toString()).where((k) => !skip.contains(k)).toList()
       ..sort();
     final parts = <String>[];

@@ -77,7 +77,9 @@ class PathFinder {
       final m =
           RegExp(r'SteamPath\s+REG_SZ\s+(.+)').firstMatch(r.stdout.toString());
       if (m != null) return m.group(1)!.trim();
-    } catch (_) {}
+    } catch (_) {
+      // reg 查询失败继续试下一个注册表项，属尽力而为的路径探测
+    }
     try {
       final r = await Process.run('reg', [
         'query',
@@ -88,7 +90,9 @@ class PathFinder {
       final m = RegExp(r'InstallPath\s+REG_SZ\s+(.+)')
           .firstMatch(r.stdout.toString());
       if (m != null) return m.group(1)!.trim();
-    } catch (_) {}
+    } catch (_) {
+      // 同上，探测失败返回 null，让上层走手动选择
+    }
     return null;
   }
 
@@ -152,7 +156,9 @@ class PathFinder {
           final found = await _shallowFindExe(loc, exeNames, maxDepth: 2);
           if (found != null) return found;
         }
-      } catch (_) {}
+      } catch (_) {
+        // 目录扫描失败跳过该安装位置，继续探测其它位置
+      }
     }
     return null;
   }
@@ -177,7 +183,9 @@ class PathFinder {
             if (hit != null) return hit;
           }
         }
-      } catch (_) {}
+      } catch (_) {
+        // 某子目录不可读时返回 null，放弃该目录的浅搜
+      }
       return null;
     }
 

@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:io';
 
@@ -21,6 +20,13 @@ import 'package:kmxzs/widgets/title_bar.dart';
 import 'package:kmxzs/widgets/update_prompt.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+part 'home_page/path_setup.dart';
+part 'home_page/license_controller.dart';
+part 'home_page/mem_controller.dart';
+part 'home_page/ks_login_controller.dart';
+part 'home_page/obs_controller.dart';
+part 'home_page/settings_widgets.dart';
+
 /// 主页：拉流虚拟摄像机模式。
 class HomePage extends StatefulWidget {
   const HomePage({super.key, required this.api, required this.auth});
@@ -32,7 +38,8 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+/// 状态基类：存放所有共享字段与基础方法，供各职责 mixin（`on _HomePageBase`）直接读写。
+abstract class _HomePageBase extends State<HomePage> {
   final _pathFinder = PathFinder();
   final _obsConfig = OBSConfig();
   final _obsWs = ObsWs();
@@ -48,7 +55,6 @@ class _HomePageState extends State<HomePage> {
   bool _skipCompanion = false;
 
   bool _busy = false;
-  bool _settingsOpen = false;
   String _status = '未连接';
   String _log = '拉流模式：填写直播间链接后点「一键开始」。';
 
@@ -63,103 +69,93 @@ class _HomePageState extends State<HomePage> {
   Timer? _mediaTimer;
   Timer? _memTimer;
   Timer? _licenseTimer;
+  Timer? _persistDebounce;
   Future<bool>? _licenseInflight;
 
   String? _notice;
   bool _expiryWarned = false;
   bool _pathSetupShowing = false;
 
-  bool get _showExpiryBanner {
-    final h = widget.auth.current?.remainingHours;
-    return h != null && h > 0 && h < 24;
-  }
-
-  String get _expiryHoursLabel {
-    final h = widget.auth.current?.remainingHours;
-    if (h == null) return '不足 24 小时';
-    return '$h 小时';
-  }
+  static const int _maxLogLines = 500;
 
   String get _companionPath => _companionPathCtrl.text.trim();
 
-  List<String> get _memOptProcessNames {
-    final name = _companionPath.replaceAll('\\', '/').split('/').last;
-    if (name.isEmpty) {
-      return const [
-        'kwailive.exe',
-        '直播伴侣.exe',
-        'WebcastMate.exe',
-        '直播伴侣 Launcher.exe',
-        'TikTok LIVE Studio.exe',
-        'TikTok LIVE Studio Launcher.exe',
-      ];
-    }
-    return [name];
+  void _appendLog(String msg) {
+    if (!mounted) return;
+    final line = '[${DateTime.now().toString().substring(11, 19)}] $msg';
+    setState(() {
+      // 日志无界增长防护：只保留最近 _maxLogLines 行（新行在前）
+      final lines = '$line\n$_log'.split('\n');
+      _log = lines.length > _maxLogLines
+          ? lines.sublist(0, _maxLogLines).join('\n')
+          : lines.join('\n');
+    });
   }
 
-  bool get _ksLoggedIn =>
-      FlvExtractor.hasKuaishouLoginCookie(_ksCookieCtrl.text);
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
+    );
+  }
 
-  Future<void> _loginKuaishouAccount({bool fromPullFail = false}) async {
-    final cookie = await KsWebLoginPage.open(context);
-    if (cookie == null || cookie.trim().isEmpty) {
-      if (fromPullFail) _appendLog('已取消快手登录');
+  /// 文本框每次按键即写盘开销大，统一走 400ms 防抖；离开页面或一键开始前仍会直接持久化。
+  void _schedulePersist() {
+    _persistDebounce?.cancel();
+    _persistDebounce = Timer(const Duration(milliseconds: 400), () {
+      unawaited(_persist());
+    });
+  }
+
+  Future<void> _persist() async {
+    final sp = await SharedPreferences.getInstance();
+    await sp.setString(PrefsKeys.obsPath, _obsPathCtrl.text.trim());
+    await sp.setString(PrefsKeys.companionPath, _companionPathCtrl.text.trim());
+    await sp.setBool(PrefsKeys.skipCompanion, _skipCompanion);
+    if (_companionPathCtrl.text.trim().isNotEmpty) {
+      await sp.setString(
+        PrefsKeys.kwailivePath,
+        _companionPathCtrl.text.trim(),
+      );
+    }
+    await sp.setString(PrefsKeys.obsWsUrl, _wsUrlCtrl.text.trim());
+    await sp.setString(PrefsKeys.roomUrl, _roomUrlCtrl.text.trim());
+    final cleanKs = FlvExtractor.sanitizeCookieHeader(_ksCookieCtrl.text);
+    if (_ksCookieCtrl.text != cleanKs) {
+      _ksCookieCtrl.text = cleanKs;
+    }
+    await sp.setString(PrefsKeys.kuaishouCookie, cleanKs);
+    await sp.setString(PrefsKeys.tiktokCookie, _ttCookieCtrl.text.trim());
+    _flvExtractor.kuaishouCookie = cleanKs.isEmpty ? null : cleanKs;
+    _flvExtractor.tiktokCookie = _ttCookieCtrl.text.trim().isEmpty
+        ? null
+        : _ttCookieCtrl.text.trim();
+    await sp.setBool(PrefsKeys.memOpt, _memOpt);
+    await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
+  }
+
+  Future<void> _launchExe(String path, {List<String> args = const []}) async {
+    if (path.isEmpty || !await File(path).exists()) {
+      _appendLog('启动失败，文件不存在: $path');
       return;
     }
-    final cleaned = FlvExtractor.sanitizeCookieHeader(cookie);
-    _ksCookieCtrl.text = cleaned;
-    await _persist();
-    _appendLog('快手账号登录成功，Cookie 已自动保存（${cleaned.length} 字符）');
-    if (mounted) {
-      _toast('快手登录成功');
-      setState(() {});
-    }
-  }
-
-  Future<void> _clearKuaishouCookie() async {
-    _ksCookieCtrl.clear();
-    await _persist();
-    if (mounted) {
-      setState(() {});
-      _toast('已退出快手网页登录态');
-    }
-  }
-
-  Future<void> _maybePromptKuaishouLogin(String failMsg) async {
-    final need = failMsg.contains('Cookie') ||
-        failMsg.contains('风控') ||
-        failMsg.contains('result=2') ||
-        failMsg.contains('操作太快');
-    if (!need || !mounted) return;
-    final go = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(_ksLoggedIn ? '快手需要重新登录' : '需要登录快手账号'),
-        content: const Text(
-          '快手网页拉流需要登录态。点击「去登录」将打开官方页面，'
-          '你完成登录后软件会自动保存 Cookie，无需手动复制。',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('稍后'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('去登录'),
-          ),
-        ],
-      ),
+    await Process.start(
+      path,
+      args,
+      workingDirectory: File(path).parent.path,
+      mode: ProcessStartMode.detached,
     );
-    if (go == true && mounted) {
-      await _loginKuaishouAccount(fromPullFail: true);
-    }
+    _appendLog('已启动: $path${args.isEmpty ? '' : ' ${args.join(' ')}'}');
   }
+}
 
-  Future<bool> _pathExists(String path) async {
-    final p = path.trim();
-    return p.isNotEmpty && await File(p).exists();
-  }
+class _HomePageState extends _HomePageBase
+    with
+        _PathSetupController,
+        _LicenseController,
+        _MemController,
+        _KuaishouController,
+        _ObsController {
 
   @override
   void initState() {
@@ -175,6 +171,7 @@ class _HomePageState extends State<HomePage> {
     _mediaTimer?.cancel();
     _memTimer?.cancel();
     _licenseTimer?.cancel();
+    _persistDebounce?.cancel();
     _obsPathCtrl.dispose();
     _companionPathCtrl.dispose();
     _wsUrlCtrl.dispose();
@@ -182,54 +179,6 @@ class _HomePageState extends State<HomePage> {
     _ksCookieCtrl.dispose();
     _ttCookieCtrl.dispose();
     super.dispose();
-  }
-
-  /// 在线验权：过期/掉线强制回登录页。并发调用会共用同一次 /me。
-  Future<bool> _ensureLicense({bool silent = false}) {
-    final existing = _licenseInflight;
-    if (existing != null) return existing;
-
-    final future = () async {
-      try {
-        await widget.auth.refreshProfile();
-        if (!widget.auth.isLicensed) {
-          await _forceRelogin('账号已过期，请充值后续费');
-          return false;
-        }
-        if (mounted) setState(() {});
-        return true;
-      } catch (e) {
-        if (!silent) {
-          _appendLog('授权校验失败: $e');
-        }
-        await _forceRelogin('授权校验失败，请重新登录');
-        return false;
-      } finally {
-        _licenseInflight = null;
-      }
-    }();
-
-    _licenseInflight = future;
-    return future;
-  }
-
-  Future<void> _forceRelogin(String reason) async {
-    _licenseTimer?.cancel();
-    await widget.auth.logout();
-    if (!mounted) return;
-    _toast(reason);
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(
-        builder: (_) => LoginPage(api: widget.api, auth: widget.auth),
-      ),
-      (_) => false,
-    );
-  }
-
-  void _appendLog(String msg) {
-    if (!mounted) return;
-    final line = '[${DateTime.now().toString().substring(11, 19)}] $msg';
-    setState(() => _log = '$line\n$_log');
   }
 
   Future<void> _loadAll() async {
@@ -283,7 +232,10 @@ class _HomePageState extends State<HomePage> {
       if (mounted) {
         await UpdatePrompt.showIfNeeded(context, widget.api, cfg);
       }
-    } catch (_) {}
+    } catch (e) {
+      // 配置/更新检查失败不阻断启动，但必须在 debug 日志留痕便于排查。
+      debugPrint('[config] 拉取客户端配置失败: $e');
+    }
 
     try {
       await widget.auth.refreshProfile();
@@ -291,7 +243,8 @@ class _HomePageState extends State<HomePage> {
         await _forceRelogin('账号已过期，请充值后续费');
         return;
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('[auth] 启动时刷新档案失败: $e');
       await _forceRelogin('授权校验失败，请重新登录');
       return;
     }
@@ -313,313 +266,6 @@ class _HomePageState extends State<HomePage> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showPathSetupDialog();
       });
-    }
-  }
-
-  Future<void> _showPathSetupDialog() async {
-    if (!mounted || _pathSetupShowing) return;
-    _pathSetupShowing = true;
-    try {
-      await showDialog<void>(
-        context: context,
-        barrierDismissible: false,
-        builder: (ctx) {
-          return StatefulBuilder(
-            builder: (ctx, setLocal) {
-              Future<void> refreshLocal() async {
-                setLocal(() {});
-                if (mounted) setState(() {});
-              }
-
-              return AlertDialog(
-                title: const Text('首次使用设置'),
-                content: SizedBox(
-                  width: 480,
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        const Text(
-                          '请设置 OBS 路径。直播伴侣可稍后在「一键开始」时选择，也可跳过由自己手动启动。',
-                          style: TextStyle(fontSize: 13, height: 1.4),
-                        ),
-                        const SizedBox(height: 16),
-                        _PathRow(
-                          label: 'OBS Studio（obs64.exe）',
-                          controller: _obsPathCtrl,
-                          onDetect: () async {
-                            await _detectObsPath(silent: false);
-                            await refreshLocal();
-                          },
-                          onPick: () async {
-                            await _pickObsPath();
-                            await refreshLocal();
-                          },
-                          onChanged: (_) => setLocal(() {}),
-                        ),
-                        const SizedBox(height: 10),
-                        _PathRow(
-                          label: '直播伴侣（可选）',
-                          controller: _companionPathCtrl,
-                          onDetect: () async {
-                            await _detectCompanionPath(silent: false);
-                            await refreshLocal();
-                          },
-                          onPick: () async {
-                            await _pickCompanionPath();
-                            await refreshLocal();
-                          },
-                          onChanged: (_) => setLocal(() {}),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-                actions: [
-                  TextButton(
-                    onPressed: () => Navigator.pop(ctx),
-                    child: const Text('稍后设置'),
-                  ),
-                  FilledButton(
-                    onPressed: () async {
-                      final obsOk = await _pathExists(_obsPathCtrl.text);
-                      if (!obsOk) {
-                        const msg = 'OBS 路径无效，请重新选择 obs64.exe';
-                        if (!ctx.mounted) return;
-                        ScaffoldMessenger.maybeOf(ctx)?.showSnackBar(
-                          const SnackBar(
-                            content: Text(msg),
-                            behavior: SnackBarBehavior.floating,
-                          ),
-                        );
-                        if (ScaffoldMessenger.maybeOf(ctx) == null && mounted) {
-                          _toast(msg);
-                        }
-                        return;
-                      }
-                      await _persist();
-                      if (ctx.mounted) Navigator.pop(ctx);
-                      _appendLog('已保存软件路径');
-                      if (mounted) _toast('路径已保存');
-                    },
-                    child: const Text('完成'),
-                  ),
-                ],
-              );
-            },
-          );
-        },
-      );
-    } finally {
-      _pathSetupShowing = false;
-    }
-  }
-
-  Future<void> _persist() async {
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString(PrefsKeys.obsPath, _obsPathCtrl.text.trim());
-    await sp.setString(PrefsKeys.companionPath, _companionPathCtrl.text.trim());
-    await sp.setBool(PrefsKeys.skipCompanion, _skipCompanion);
-    if (_companionPathCtrl.text.trim().isNotEmpty) {
-      await sp.setString(
-        PrefsKeys.kwailivePath,
-        _companionPathCtrl.text.trim(),
-      );
-    }
-    await sp.setString(PrefsKeys.obsWsUrl, _wsUrlCtrl.text.trim());
-    await sp.setString(PrefsKeys.roomUrl, _roomUrlCtrl.text.trim());
-    final cleanKs = FlvExtractor.sanitizeCookieHeader(_ksCookieCtrl.text);
-    if (_ksCookieCtrl.text != cleanKs) {
-      _ksCookieCtrl.text = cleanKs;
-    }
-    await sp.setString(PrefsKeys.kuaishouCookie, cleanKs);
-    await sp.setString(PrefsKeys.tiktokCookie, _ttCookieCtrl.text.trim());
-    _flvExtractor.kuaishouCookie = cleanKs.isEmpty ? null : cleanKs;
-    _flvExtractor.tiktokCookie = _ttCookieCtrl.text.trim().isEmpty
-        ? null
-        : _ttCookieCtrl.text.trim();
-    await sp.setBool(PrefsKeys.memOpt, _memOpt);
-    await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
-  }
-
-  Future<void> _detectObsPath({bool silent = false}) async {
-    final path = await _pathFinder.detectObsPath();
-    if (path == null) {
-      if (!silent) _toast('未检测到 OBS Studio，请手动选择 obs64.exe');
-      return;
-    }
-    _obsPathCtrl.text = path;
-    await _persist();
-    if (!silent) _appendLog('OBS: $path');
-    setState(() {});
-  }
-
-  Future<void> _detectCompanionPath({bool silent = false}) async {
-    final path = await _pathFinder.detectCompanionPath();
-    if (path == null) {
-      if (!silent) _toast('未检测到直播伴侣，请手动选择可执行文件');
-      return;
-    }
-    _companionPathCtrl.text = path;
-    _skipCompanion = false;
-    await _persist();
-    if (!silent) _appendLog('直播伴侣: $path');
-    setState(() {});
-  }
-
-  Future<void> _pickObsPath() async {
-    final r = await FilePicker.platform.pickFiles(
-      dialogTitle: '选择 obs64.exe',
-      type: FileType.custom,
-      allowedExtensions: ['exe'],
-    );
-    if (r == null || r.files.single.path == null) return;
-    _obsPathCtrl.text = r.files.single.path!;
-    await _persist();
-    setState(() {});
-  }
-
-  Future<bool> _pickCompanionPath() async {
-    final r = await FilePicker.platform.pickFiles(
-      dialogTitle: '选择直播伴侣',
-      type: FileType.custom,
-      allowedExtensions: ['exe'],
-    );
-    if (r == null || r.files.single.path == null) return false;
-    _companionPathCtrl.text = r.files.single.path!;
-    _skipCompanion = false;
-    await _persist();
-    setState(() {});
-    return true;
-  }
-
-  /// 一键开始前：路径存在则启动；不存在则弹窗（可选路径 / 跳过）。
-  /// 返回 false 表示用户取消，应中止流程。
-  Future<bool> _prepareCompanionLaunch() async {
-    final companion = _companionPath;
-    if (companion.isNotEmpty && await File(companion).exists()) {
-      await _launchExe(companion);
-      return true;
-    }
-    if (_skipCompanion) {
-      _appendLog('已跳过直播伴侣，请自行手动启动');
-      return true;
-    }
-    if (!mounted) return false;
-    final action = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return AlertDialog(
-          title: const Text('设置直播伴侣'),
-          content: const Text(
-            '尚未设置有效的直播伴侣路径。可以选择伴侣程序，'
-            '或跳过（稍后自己手动打开直播伴侣）。',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'cancel'),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, 'skip'),
-              child: const Text('跳过直播伴侣'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, 'pick'),
-              child: const Text('选择路径'),
-            ),
-          ],
-        );
-      },
-    );
-    if (action == 'skip') {
-      _skipCompanion = true;
-      await _persist();
-      _appendLog('已跳过直播伴侣路径设置，请自行手动启动');
-      if (mounted) _toast('已跳过，请自行打开直播伴侣');
-      return true;
-    }
-    if (action == 'pick') {
-      final ok = await _pickCompanionPath();
-      if (!ok) {
-        _toast('未选择直播伴侣');
-        return false;
-      }
-      await _launchExe(_companionPath);
-      return true;
-    }
-    return false;
-  }
-
-  Future<void> _launchExe(String path, {List<String> args = const []}) async {
-    if (path.isEmpty || !await File(path).exists()) {
-      _appendLog('启动失败，文件不存在: $path');
-      return;
-    }
-    await Process.start(
-      path,
-      args,
-      workingDirectory: File(path).parent.path,
-      mode: ProcessStartMode.detached,
-    );
-    _appendLog('已启动: $path${args.isEmpty ? '' : ' ${args.join(' ')}'}');
-  }
-
-  Future<void> _ensureObsReady() async {
-    final fix = await _obsConfig.handleNew();
-    _appendLog(
-      '已自动配置 OBS WebSocket：${fix.changes.join('；')}'
-      '${fix.error == null ? '' : '；写入异常: ${fix.error}'}',
-    );
-
-    final running = await _obsConfig.isObsProcessRunning();
-    final portOpen = await _obsConfig.isWebsocketPortOpen();
-    final shouldRestart = running && (fix.needRestart || !portOpen);
-    if (shouldRestart) {
-      _appendLog('重启 OBS 以加载 WebSocket 配置...');
-      await _obsConfig.killObsIfRunning();
-    }
-
-    if (!await _obsConfig.isObsProcessRunning()) {
-      await _launchExe(
-        _obsPathCtrl.text.trim(),
-        args: const ['--disable-shutdown-check', '--disable-updater'],
-      );
-    }
-
-    final ok = await _obsConfig.waitWebsocketPort(
-      timeout: const Duration(seconds: 75),
-      onProgress: _appendLog,
-    );
-    if (!ok) {
-      throw StateError(
-        '无法连接到 OBS WebSocket（网络或地址错误）\n'
-        '请确认 OBS 已启动并启用了 WebSocket',
-      );
-    }
-  }
-
-  Future<void> _testObsWs({required bool silent}) async {
-    await _persist();
-    setState(() => _status = '连接中');
-    try {
-      await _ensureObsReady();
-      await _obsWs.connectWithRetry(
-        _wsUrlCtrl.text.trim(),
-        maxAttempts: silent ? 10 : 5,
-        gap: const Duration(seconds: 1),
-        onAttempt: _appendLog,
-      );
-      setState(() => _status = '已连接');
-      _appendLog('OBS WebSocket 已连接');
-      if (!silent) _toast('测试连接成功');
-    } catch (e) {
-      setState(() => _status = '未连接');
-      _appendLog('OBS 连接失败: $e');
-      if (!silent) _toast('OBS 拒绝连接，请确认 OBS 已启动并启用了 WebSocket');
-      rethrow;
     }
   }
 
@@ -694,100 +340,6 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  String _friendlyPullError(String raw) {
-    final m = raw.toLowerCase();
-    if (m.contains('result=2') ||
-        m.contains('操作频繁') ||
-        m.contains('操作太快') ||
-        m.contains('风控') ||
-        m.contains('captcha')) {
-      return '快手需要登录态或触发了风控。请点「登录快手账号」，并关闭 Clash TUN 后重试';
-    }
-    if (m.contains('tiktok') &&
-        (m.contains('cookie') || m.contains('未解析') || m.contains('地区'))) {
-      return 'TikTok 解析失败。请确认开播中，关闭代理或粘贴 www.tiktok.com Cookie 后重试';
-    }
-    if (m.contains('未开播') || m.contains('not live') || m.contains('offline') || m.contains('直播已结束')) {
-      return '直播间似乎未开播，请确认链接后重试';
-    }
-    if (m.contains('cookie')) {
-      return '需要登录态。请点击「登录快手账号」完成网页登录';
-    }
-    if (m.contains('timeout') || m.contains('timed out') || m.contains('连接')) {
-      return '网络连接失败。若开了 Clash TUN，请先关闭或将目标域名设为直连';
-    }
-    if (raw.trim().isEmpty) return '拉流提取失败，请检查链接与网络';
-    return '拉流失败：$raw';
-  }
-
-  void _startMediaMonitor() {
-    _mediaTimer?.cancel();
-    _mediaTimer = Timer.periodic(
-      const Duration(seconds: 3),
-      (_) => _tickMediaMonitor(),
-    );
-  }
-
-  Future<void> _tickMediaMonitor() async {
-    if (_busy || !mounted) return;
-    final pull = await _obsWs.pullState();
-    if (pull == PullState.idle) return;
-    if (!_pullBaseline) {
-      _pullBaseline = true;
-      _wasPlaying = pull == PullState.playing;
-      return;
-    }
-    if (pull == PullState.ended && _wasPlaying) {
-      _wasPlaying = false;
-      _appendLog('检测到关播：媒体源已结束');
-      if (_autoStopOnMediaEnd) {
-        await _obsWs.stopVirtualCam();
-        _appendLog('已自动停止虚拟摄像机（关播）');
-      }
-      if (mounted) setState(() => _status = '已关播');
-    } else if (pull == PullState.playing && !_wasPlaying) {
-      _wasPlaying = true;
-      try {
-        _appendLog(await _obsWs.ensureVirtualCamStarted());
-      } catch (e) {
-        _appendLog('重启虚拟摄像机失败: $e');
-      }
-      if (mounted) setState(() => _status = '已就绪');
-    }
-  }
-
-  void _startMemOpt() {
-    _memTimer?.cancel();
-    _memTimer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) => _tickMemOpt(),
-    );
-  }
-
-  void _stopMemOpt() {
-    _memTimer?.cancel();
-    _memTimer = null;
-  }
-
-  Future<void> _tickMemOpt() async {
-    if (_memRunning) return;
-    _memRunning = true;
-    try {
-      final trimmed =
-          await MemOptimizer.instance.trimProcesses(_memOptProcessNames);
-      if (trimmed > 0 &&
-          (_lastMemLog == null ||
-              DateTime.now().difference(_lastMemLog!) >=
-                  const Duration(minutes: 1))) {
-        _lastMemLog = DateTime.now();
-        _appendLog('优化直播伴侣内存：已回收工作集');
-      }
-    } catch (_) {
-    } finally {
-      _memRunning = false;
-    }
-  }
-
   Future<void> _showTopup() async {
     final ctrl = TextEditingController();
     final kami = await showDialog<String>(
@@ -821,7 +373,10 @@ class _HomePageState extends State<HomePage> {
       if (profile == null) {
         try {
           await widget.auth.refreshProfile();
-        } catch (_) {}
+        } catch (e) {
+          // 充值成功但刷新档案失败：授权轮询会补拉，这里不打扰用户。
+          debugPrint('[topup] 充值后刷新档案失败: $e');
+        }
       }
       if (mounted) setState(() {});
       _toast('充值成功');
@@ -857,13 +412,6 @@ class _HomePageState extends State<HomePage> {
       MaterialPageRoute(
         builder: (_) => LoginPage(api: widget.api, auth: widget.auth),
       ),
-    );
-  }
-
-  void _toast(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating),
     );
   }
 
@@ -924,7 +472,7 @@ class _HomePageState extends State<HomePage> {
                 const SizedBox(height: 12),
                 TextField(
                   controller: _roomUrlCtrl,
-                  onChanged: (_) => _persist(),
+                  onChanged: (_) => _schedulePersist(),
                   decoration: InputDecoration(
                     labelText: '直播间链接',
                     hintText: '抖音 / 快手 / B站 / 小红书 / YouTube / TikTok',
@@ -967,188 +515,15 @@ class _HomePageState extends State<HomePage> {
                           : () async {
                               try {
                                 await _testObsWs(silent: false);
-                              } catch (_) {}
+                              } catch (_) {
+                                // _testObsWs 已把失败原因写入日志与 toast，这里吞掉避免重复弹窗。
+                              }
                             },
                       child: const Text('测试连接'),
                     ),
                   ],
                 ),
-                Theme(
-                  data: Theme.of(context)
-                      .copyWith(dividerColor: Colors.transparent),
-                  child: ExpansionTile(
-                    initiallyExpanded: false,
-                    tilePadding: EdgeInsets.zero,
-                    onExpansionChanged: (v) =>
-                        setState(() => _settingsOpen = v),
-                    title: Text(
-                      _settingsOpen ? '收起设置' : '设置',
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    children: [
-                      _PathRow(
-                        label: 'OBS Studio 安装路径',
-                        controller: _obsPathCtrl,
-                        onDetect: () => _detectObsPath(),
-                        onPick: _pickObsPath,
-                        onChanged: (_) => _persist(),
-                      ),
-                      const SizedBox(height: 8),
-                      _PathRow(
-                        label: '直播伴侣',
-                        controller: _companionPathCtrl,
-                        onDetect: () => _detectCompanionPath(),
-                        onPick: _pickCompanionPath,
-                        onChanged: (_) {
-                          _skipCompanion = false;
-                          _persist();
-                        },
-                      ),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('跳过直播伴侣路径设置'),
-                        subtitle: const Text('没有有效路径时不弹窗；已设置路径时仍会自动启动'),
-                        value: _skipCompanion,
-                        onChanged: (v) {
-                          setState(() => _skipCompanion = v);
-                          _persist();
-                        },
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _wsUrlCtrl,
-                        onChanged: (_) => _persist(),
-                        decoration: InputDecoration(
-                          labelText: 'OBS WebSocket 地址',
-                          filled: true,
-                          fillColor: Colors.white,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: const Color(0xFFE2E8F0)),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Icon(
-                                  _ksLoggedIn
-                                      ? Icons.verified_user
-                                      : Icons.login,
-                                  size: 18,
-                                  color: _ksLoggedIn
-                                      ? Colors.green.shade700
-                                      : Colors.blueGrey,
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _ksLoggedIn
-                                        ? '快手网页账号：已登录（拉流可用）'
-                                        : '快手网页账号：未登录（拉流易被风控）',
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            Text(
-                              _ksLoggedIn
-                                  ? 'Cookie 已自动保存。失效时可重新登录。'
-                                  : '点击下方按钮打开快手官网登录，完成后自动获取 Cookie。',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade700,
-                              ),
-                            ),
-                            const SizedBox(height: 10),
-                            Row(
-                              children: [
-                                FilledButton.icon(
-                                  onPressed: _busy
-                                      ? null
-                                      : () => _loginKuaishouAccount(),
-                                  icon: const Icon(Icons.open_in_browser, size: 18),
-                                  label: Text(_ksLoggedIn ? '重新登录' : '登录快手账号'),
-                                ),
-                                const SizedBox(width: 8),
-                                if (_ksLoggedIn)
-                                  TextButton(
-                                    onPressed: _busy ? null : _clearKuaishouCookie,
-                                    child: const Text('退出登录'),
-                                  ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _ttCookieCtrl,
-                        onChanged: (_) => _persist(),
-                        maxLines: 2,
-                        decoration: InputDecoration(
-                          labelText: 'TikTok Cookie（可选）',
-                          hintText: '浏览器登录 www.tiktok.com 后粘贴，部分地区/18+需要',
-                          filled: true,
-                          fillColor: Colors.white,
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                        ),
-                      ),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('优化直播伴侣内存'),
-                        value: _memOpt,
-                        onChanged: (v) async {
-                          setState(() => _memOpt = v);
-                          await _persist();
-                          if (v) {
-                            _startMemOpt();
-                            _appendLog('已开启内存优化');
-                          } else {
-                            _stopMemOpt();
-                            _appendLog('已关闭内存优化');
-                          }
-                        },
-                      ),
-                      SwitchListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('关播自动停止虚拟摄像机'),
-                        value: _autoStopOnMediaEnd,
-                        onChanged: (v) async {
-                          setState(() => _autoStopOnMediaEnd = v);
-                          await _persist();
-                        },
-                      ),
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: const Icon(Icons.info_outline),
-                        title: const Text('关于'),
-                        subtitle: const Text(
-                          '${AppConfig.productName}  v${AppVersion.name}\n${AppAbout.publisherLine}',
-                        ),
-                        onTap: () => AppAbout.show(context),
-                      ),
-                    ],
-                  ),
-                ),
+                _SettingsPanel(state: this),
                 const SizedBox(height: 8),
                 Text(
                   '运行日志',
@@ -1191,185 +566,6 @@ class _HomePageState extends State<HomePage> {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _AccountBanner extends StatelessWidget {
-  const _AccountBanner({
-    required this.auth,
-    required this.onTopup,
-    required this.onLogout,
-  });
-
-  final Auth auth;
-  final VoidCallback onTopup;
-  final VoidCallback onLogout;
-
-  @override
-  Widget build(BuildContext context) {
-    final a = auth.current;
-    final card = a?.card ?? '—';
-    final remain = a?.remainingLabel ?? '未知';
-    final expires = a?.expiresLabel ?? '未知';
-    final device = a?.deviceId ?? '—';
-    final used = a?.deviceCount;
-    final max = a?.maxDevices;
-    final deviceLine = (used != null && max != null)
-        ? '设备 $used/$max · $device'
-        : '设备 · $device';
-    final low = (a?.remainingHours ?? 999) < 24;
-    final expired = (a?.remainingHours ?? 1) <= 0;
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
-      decoration: BoxDecoration(
-        color: expired
-            ? const Color(0xFFFEF2F2)
-            : low
-                ? const Color(0xFFFFF7ED)
-                : Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: expired
-              ? const Color(0xFFFECACA)
-              : low
-                  ? const Color(0xFFFED7AA)
-                  : const Color(0xFFE2E8F0),
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '卡密 $card',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 14,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  '剩余 $remain · 到期 $expires',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: expired
-                        ? const Color(0xFFB91C1C)
-                        : low
-                            ? const Color(0xFFC2410C)
-                            : const Color(0xFF475569),
-                    fontWeight:
-                        low || expired ? FontWeight.w600 : FontWeight.w400,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  deviceLine,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: Color(0xFF64748B)),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              TextButton(
-                onPressed: onTopup,
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                ),
-                child: const Text('卡密充值'),
-              ),
-              TextButton(
-                onPressed: onLogout,
-                style: TextButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  foregroundColor: const Color(0xFF64748B),
-                ),
-                child: const Text('退出登录'),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final ok = value == '已连接' ||
-        value == '已就绪' ||
-        value == '已登录';
-    final color = ok ? const Color(0xFF15803D) : const Color(0xFF64748B);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Text(
-        '$label · $value',
-        style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w600),
-      ),
-    );
-  }
-}
-
-class _PathRow extends StatelessWidget {
-  const _PathRow({
-    required this.label,
-    required this.controller,
-    required this.onDetect,
-    required this.onPick,
-    required this.onChanged,
-  });
-
-  final String label;
-  final TextEditingController controller;
-  final VoidCallback onDetect;
-  final VoidCallback onPick;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: controller,
-            onChanged: onChanged,
-            decoration: InputDecoration(
-              labelText: label,
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        OutlinedButton(onPressed: onDetect, child: const Text('检测')),
-        const SizedBox(width: 4),
-        OutlinedButton(onPressed: onPick, child: const Text('手动选择')),
-      ],
     );
   }
 }

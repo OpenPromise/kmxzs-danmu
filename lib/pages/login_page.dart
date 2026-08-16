@@ -47,8 +47,9 @@ class _LoginPageState extends State<LoginPage> {
 
     try {
       await widget.api.pingHealth();
-    } catch (_) {
-      // 连通失败不挡登录页，登录时再提示
+    } catch (e) {
+      // 连通失败不挡登录页，登录时再提示；留 debug 日志便于排查
+      debugPrint('[bootstrap] 健康检查失败: $e');
     }
 
     try {
@@ -57,7 +58,10 @@ class _LoginPageState extends State<LoginPage> {
       if (mounted) {
         await UpdatePrompt.showIfNeeded(context, widget.api, cfg);
       }
-    } catch (_) {}
+    } catch (e) {
+      // 配置/更新检查失败不阻断登录页，但必须留日志（更新检查失败静默等于错过升级）
+      debugPrint('[bootstrap] 拉取配置/更新检查失败: $e');
+    }
     if (mounted) setState(() {});
   }
 

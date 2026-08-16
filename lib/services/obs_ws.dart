@@ -63,7 +63,9 @@ class ObsWs {
   Future<void> disconnect() async {
     try {
       await _client?.close().timeout(const Duration(seconds: 2));
-    } catch (_) {}
+    } catch (_) {
+      // 关闭已断开的连接抛错可安全忽略，后续统一置空
+    }
     _client = null;
     if (state != ObsWsState.disconnected) {
       state = ObsWsState.disconnected;
@@ -219,12 +221,15 @@ class ObsWs {
           )
           .timeout(const Duration(seconds: 5));
     } catch (_) {
+      // restart 不可用时回退到 play；仍失败则交给上层日志
       try {
         await c.mediaInputs.triggerMediaInputAction(
           inputName: mediaSourceName,
           mediaAction: ObsMediaInputAction.play,
         );
-      } catch (_) {}
+      } catch (_) {
+        // play 也失败表示 OBS 状态异常，让上层报错即可，这里不再补日志
+      }
     }
 
     await Future.delayed(Duration(milliseconds: isHls ? 1800 : 1200));
@@ -237,6 +242,7 @@ class ObsWs {
           : mediaUrl;
       return 'mediaState=${st.mediaState}; format=$format; urlLen=${mediaUrl.length}; $short';
     } catch (_) {
+      // 查询媒体状态失败返回 unknown，仅影响日志可读性，可安全忽略
       return 'mediaStatus unknown; format=$format; urlLen=${mediaUrl.length}';
     }
   }
@@ -263,6 +269,7 @@ class ObsWs {
           return PullState.idle;
       }
     } catch (_) {
+      // 拉不到状态按 idle 处理（不触发关播/开播逻辑），避免误判
       return PullState.idle;
     }
   }
@@ -279,7 +286,9 @@ class ObsWs {
         await c.stream.stopStream().timeout(const Duration(seconds: 5));
         await Future.delayed(const Duration(milliseconds: 800));
       }
-    } catch (_) {}
+    } catch (_) {
+      // 切换推流服务前停止旧推流属尽力而为，失败继续覆盖配置
+    }
 
     await c.config
         .setStreamServiceSettings(
@@ -299,7 +308,9 @@ class ObsWs {
     if (c == null) return;
     try {
       await c.stream.stopStream().timeout(const Duration(seconds: 5));
-    } catch (_) {}
+    } catch (_) {
+      // 停止推流失败不影响连接状态标记，可安全忽略
+    }
     state = ObsWsState.connected;
   }
 
@@ -314,7 +325,7 @@ class ObsWs {
         return '虚拟摄像机已在运行';
       }
     } catch (_) {
-      // 继续尝试 StartVirtualCam
+      // 查询虚拟摄像机状态失败不阻塞，继续尝试 StartVirtualCam
     }
 
     try {
@@ -356,7 +367,9 @@ class ObsWs {
     if (c == null) return;
     try {
       await c.outputs.stopVirtualCam().timeout(const Duration(seconds: 5));
-    } catch (_) {}
+    } catch (_) {
+      // 停止虚拟摄像机失败（如已停止）可安全忽略
+    }
   }
 }
 

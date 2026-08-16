@@ -1,6 +1,7 @@
 import 'package:kmxzs/models/api_models.dart';
 import 'package:kmxzs/services/api.dart';
 import 'package:kmxzs/services/prefs_keys.dart';
+import 'package:kmxzs/services/secure_store.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class Auth {
@@ -25,16 +26,17 @@ class Auth {
   Future<String?> getSavedCard() async {
     final sp = await SharedPreferences.getInstance();
     if (sp.getBool(PrefsKeys.rememberCard) != true) return null;
-    return sp.getString(PrefsKeys.savedCard);
+    // DPAPI 加密存储；内部会迁移旧明文数据
+    return SecureStore.read(PrefsKeys.savedCard);
   }
 
   Future<void> saveCard(String card, {required bool remember}) async {
     final sp = await SharedPreferences.getInstance();
     await sp.setBool(PrefsKeys.rememberCard, remember);
     if (remember) {
-      await sp.setString(PrefsKeys.savedCard, card);
+      await SecureStore.write(PrefsKeys.savedCard, card);
     } else {
-      await sp.remove(PrefsKeys.savedCard);
+      await SecureStore.remove(PrefsKeys.savedCard);
     }
   }
 

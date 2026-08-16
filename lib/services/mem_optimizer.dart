@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 /// 内存优化：仅对空闲的后台进程（默认 kwailive.exe）做 EmptyWorkingSet。
 ///
@@ -81,7 +82,9 @@ class MemOptimizer {
         if (pid != null) pids.add(pid);
       }
       return pids;
-    } catch (_) {
+    } catch (e) {
+      // tasklist 调用失败视为扫描不到进程，下个周期自动重试
+      debugPrint('[mem-opt] 枚举进程失败: $e');
       return const [];
     }
   }

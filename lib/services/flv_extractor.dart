@@ -377,7 +377,9 @@ class FlvExtractor {
           if (streamData is String && streamData.isNotEmpty) {
             _collectStreamDataUrls(jsonDecode(streamData), flv, hls);
           }
-        } catch (_) {}
+        } catch (_) {
+          // 单个回包里的 stream_data 解析失败跳过该包，继续其它候选
+        }
       }
     } catch (e) {
       notes.add('reflow 失败: $e');
@@ -465,7 +467,9 @@ class FlvExtractor {
       try {
         final j = jsonDecode(data);
         if (j is Map) return Map<String, dynamic>.from(j);
-      } catch (_) {}
+      } catch (_) {
+        // 字符串不是合法 JSON 时按无数据返回，属正常回退
+      }
     }
     return null;
   }
@@ -599,7 +603,9 @@ class FlvExtractor {
             if (_looksPlayableFlv(u)) flv.add(u);
           }
         }
-      } catch (_) {}
+      } catch (_) {
+        // 个别字段结构异常跳过，不影响已收集到的地址
+      }
     }
   }
 
@@ -1467,7 +1473,9 @@ class FlvExtractor {
           try {
             final j = jsonDecode(body.substring(start, i + 1));
             if (j is Map) return Map<String, dynamic>.from(j);
-          } catch (_) {}
+          } catch (_) {
+            // 片段不是合法 JSON 时放弃该片段，返回 null 交给上层
+          }
           return null;
         }
       }
@@ -1497,7 +1505,9 @@ class FlvExtractor {
           if (t.startsWith('http')) urls.add(t);
         }
         if (urls.isNotEmpty) return urls;
-      } catch (_) {}
+      } catch (_) {
+        // 子进程输出解析失败按无候选处理，正常回退
+      }
     }
     return const [];
   }
@@ -1632,7 +1642,9 @@ class FlvExtractor {
         final j = jsonDecode(jsonStr);
         final id = _ttFindRoomId(j);
         if (id != null) return id;
-      } catch (_) {}
+      } catch (_) {
+        // 该候选 JSON 解析失败继续试下一个，属正常探测
+      }
     }
     for (final p in [
       RegExp(r'"roomId"\s*:\s*"(\d{10,})"'),
@@ -2165,7 +2177,9 @@ class FlvExtractor {
     try {
       final j = jsonDecode(raw);
       if (j is Map) return Map<String, dynamic>.from(j);
-    } catch (_) {}
+    } catch (_) {
+      // 提取的 JSON 片段不完整时返回 null，走其它解析路径
+    }
     return null;
   }
 
@@ -2180,6 +2194,7 @@ class FlvExtractor {
       try {
         cfg = jsonDecode(cfg);
       } catch (_) {
+        // 配置串非 JSON 时直接放弃该候选（无地址可用），安全返回
         return;
       }
     }

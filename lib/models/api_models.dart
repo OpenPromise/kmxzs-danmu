@@ -173,6 +173,9 @@ class AppRemoteConfig {
   final bool forceUpdate;
   final String? serverVersion;
   final int? downloadSize;
+  /// 安装包 SHA-256（hex）与 Ed25519 签名（base64），客户端下载后先校验再安装。
+  final String? downloadSha256;
+  final String? downloadSig;
   final Map<String, dynamic> raw;
 
   AppRemoteConfig({
@@ -183,6 +186,8 @@ class AppRemoteConfig {
     this.forceUpdate = false,
     this.serverVersion,
     this.downloadSize,
+    this.downloadSha256,
+    this.downloadSig,
     this.raw = const {},
   });
 
@@ -196,6 +201,8 @@ class AppRemoteConfig {
         forceUpdate: json['force'] == true || json['force'] == 1,
         serverVersion: json['serverVersion']?.toString(),
         downloadSize: int.tryParse('${json['downloadSize'] ?? json['download_size'] ?? ''}'),
+        downloadSha256: json['downloadSha256']?.toString(),
+        downloadSig: json['downloadSig']?.toString(),
         raw: json,
       );
 }

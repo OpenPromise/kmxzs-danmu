@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+*.tsbuildinfo
+# tsc 复合项目可能误生成的 vite.config.js/.d.ts，避免 Vite 优先加载旧 JS 配置
+vite.config.js
+vite.config.d.ts
+.DS_Store

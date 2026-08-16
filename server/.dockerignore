@@ -1,4 +1,4 @@
-# 不要把本地 venv / 数据库 / 密钥打进镜像
+# 不要把本地 venv / 数据库 / 密钥 / 反代证书打进应用镜像
 .venv/
 venv/
 __pycache__/
@@ -14,3 +14,9 @@ data/
 .gitignore
 docker-compose*.yml
 .env.example
+# Caddy 反代与自签证书只供 caddy 服务挂载，应用镜像不需要
+caddy/
+certs/
+# scripts/ 必须进镜像：backup-db.sh 由宿主机 cron 通过 docker exec 调用
+tests/
+pytest.ini

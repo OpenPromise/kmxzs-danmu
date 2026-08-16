@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # 先用 paths-filter 计算哪些目录有变更，各 job 按需触发
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      server: ${{ steps.filter.outputs.server }}
+      admin-web: ${{ steps.filter.outputs.admin-web }}
+      client: ${{ steps.filter.outputs.client }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            server:
+              - 'server/**'
+            admin-web:
+              - 'admin-web/**'
+              - '.github/workflows/ci.yml'
+            client:
+              - 'lib/**'
+              - 'test/**'
+              - 'pubspec.yaml'
+              - 'pubspec.lock'
+              - 'analysis_options.yaml'
+
+  server:
+    name: server (pytest)
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run pytest
+        run: python -m pytest tests -q
+
+  admin-web:
+    name: admin-web (build)
+    needs: changes
+    if: needs.changes.outputs.admin-web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: admin-web/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+
+  client:
+    name: client (flutter analyze)
+    needs: changes
+    if: needs.changes.outputs.client == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Fetch dependencies
+        run: flutter pub get
+      # CI 不跑 Windows 编译（需 Windows runner 且慢）；analyze 即可覆盖静态问题。
+      # --no-fatal-infos/warnings：仓库存在历史 style 级 lint（FFI 结构体命名、tool/ 里的 print），
+      # 让它们不导致失败，但 error 仍是致命（保证新代码不出错）。
+      - name: Analyze
+        run: flutter analyze --no-fatal-infos --no-fatal-warnings

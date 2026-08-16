@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:kmxzs/config/app_config.dart';
 import 'package:kmxzs/models/api_models.dart';
 import 'package:kmxzs/services/api_sign.dart';
+import 'package:kmxzs/services/device_fingerprint.dart';
+import 'package:kmxzs/services/http_client_factory.dart';
 import 'package:uuid/uuid.dart';
 
 /// 卡密 API 客户端。服务地址由 [AppConfig] 注入，不在 UI 暴露。
@@ -25,7 +27,7 @@ class Api {
                   'Accept': 'application/json',
                 },
               ),
-            );
+            )..httpClientAdapter = HttpClientFactory.dioAdapter();
 
   /// @nodoc 兼容旧引用；实际默认见 AppConfig
   static const defaultBaseUrl = 'http://127.0.0.1:18088';
@@ -121,8 +123,9 @@ class Api {
       final localMid = (t0 + t1) ~/ 2;
       _clockOffsetMs = serverMs - localMid;
       _clockSyncedAt = DateTime.now();
-    } catch (_) {
-      // 校准失败时仍用本机时间；服务端 5 分钟窗口兜底
+    } catch (e) {
+      // 校准失败时仍用本机时间；服务端 5 分钟窗口兜底，仅留 debug 日志
+      debugPrint('[api] 时钟校准失败: $e');
     }
   }
 
@@ -143,6 +146,8 @@ class Api {
     final payload = <String, dynamic>{
       ...body,
       'deviceId': deviceId,
+      // 携带旧指纹供服务端做一次静默迁移（同机老账号不触发设备数上限）
+      'legacyDeviceId': await DeviceFingerprint.legacyId(),
       'timestamp': timestamp,
       'nonce': nonce,
     };
@@ -186,7 +191,7 @@ class Api {
   Future<String> deviceId() => _deviceId();
 
   Future<String> _deviceId() async {
-    return 'win-${Platform.localHostname}-${Platform.numberOfProcessors}';
+    return DeviceFingerprint.currentId();
   }
 
   Future<Authentication> login(String card) async {

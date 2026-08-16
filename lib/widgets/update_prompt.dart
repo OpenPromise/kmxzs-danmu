@@ -15,7 +15,10 @@ class UpdatePrompt {
       final cfg = await api.loadConfig();
       if (!context.mounted) return;
       await showIfNeeded(context, api, cfg);
-    } catch (_) {}
+    } catch (e) {
+      // 更新检查失败必须留日志，避免静默错过客户端关键升级
+      debugPrint('[update] 更新检查失败: $e');
+    }
   }
 
   static Future<void> showIfNeeded(
@@ -24,12 +27,16 @@ class UpdatePrompt {
     AppRemoteConfig cfg,
   ) async {
     if (_sessionHandled) return;
-    final latest = cfg.version;
-    if (latest == null || latest.isEmpty) return;
+    final latest = (cfg.version ?? '').trim();
     final belowMin = cfg.minVersion != null &&
         cfg.minVersion!.isNotEmpty &&
         AppVersion.isOlderThan(cfg.minVersion!);
-    final hasUpdate = AppVersion.isOlderThan(latest);
+    final hasUpdate = latest.isNotEmpty && AppVersion.isOlderThan(latest);
+    // 修复：仅配置 minVersion（无 version）时也要能触发强更
+    if (latest.isEmpty &&
+        (cfg.minVersion == null || cfg.minVersion!.isEmpty)) {
+      return;
+    }
     if (!hasUpdate && !belowMin) return;
     if (!context.mounted) return;
     _sessionHandled = true;
@@ -115,6 +122,12 @@ class _SilentUpdateDialogState extends State<_SilentUpdateDialog> {
           });
         },
       );
+      // 阶段3：先验签再安装，防投毒；失败抛错由下方 catch 展示
+      await _updater.verifyPackage(
+        file,
+        sha256: widget.cfg.downloadSha256,
+        signature: widget.cfg.downloadSig,
+      );
       if (!mounted) return;
       setState(() {
         _downloading = false;
@@ -166,7 +179,7 @@ class _SilentUpdateDialogState extends State<_SilentUpdateDialog> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '当前版本 ${AppVersion.name}\n最新版本 ${widget.latest}'
+            '当前版本 ${AppVersion.name}\n最新版本 ${widget.latest.isEmpty ? (widget.cfg.minVersion ?? '') : widget.latest}'
             '\n将自动下载并静默安装，完成后自动重启。'
             '${widget.belowMin ? '\n低于最低可用版本 ${widget.cfg.minVersion}' : ''}'
             '${widget.force ? '\n请更新后继续使用' : ''}',

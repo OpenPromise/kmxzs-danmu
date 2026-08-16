@@ -98,7 +98,9 @@ class KsWebLoginPage {
       dismissTip();
       try {
         webview.close();
-      } catch (_) {}
+      } catch (_) {
+        // 窗口可能已被用户手动关闭，close 报错可安全忽略
+      }
       if (!completer.isCompleted) completer.complete(cookie);
     }
 
@@ -108,7 +110,9 @@ class KsWebLoginPage {
       if (goLive) {
         try {
           webview.launch(liveHomeUrl, triggerOnUrlRequestEvent: false);
-        } catch (_) {}
+        } catch (_) {
+          // 跳转失败不影响后续读取已存 Cookie，可安全忽略
+        }
         await _waitNavigatingDone(webview);
         await Future.delayed(const Duration(milliseconds: 1800));
       }
@@ -116,7 +120,9 @@ class KsWebLoginPage {
       List nativeCookies = const [];
       try {
         nativeCookies = await webview.getAllCookies();
-      } catch (_) {}
+      } catch (_) {
+        // 读不到原生 Cookie 时降级用 document.cookie，可安全忽略
+      }
       final fromJs = await _documentCookie(webview);
       final merged = _mergeCookies(nativeCookies, fromJs);
       final header = _toHeader(merged);
@@ -143,14 +149,18 @@ class KsWebLoginPage {
           if (_isStrongLogin(r.header, r.names)) {
             finish(r.header);
           }
-        } catch (_) {}
+        } catch (_) {
+          // 自动保存失败由「我已登录」按钮兜底，这里静默忽略
+        }
       });
       return true;
     });
 
     try {
       await webview.setApplicationNameForUserAgent(' kmxzs/1.0');
-    } catch (_) {}
+    } catch (_) {
+      // 非关键装饰性设置，失败不影响登录流程
+    }
     webview.launch(passportUrl);
 
     if (!context.mounted) {
@@ -254,14 +264,18 @@ class KsWebLoginPage {
       try {
         await d.delete(recursive: true);
       } catch (_) {
-        // 个别文件可能被占用，尽量删子项
+        // 个别文件可能被 WebView2 占用，属尽力而为的清理，可安全忽略
         try {
           await for (final entity in d.list(followLinks: false)) {
             try {
               await entity.delete(recursive: true);
-            } catch (_) {}
+            } catch (_) {
+              // 单文件删除失败同样尽力而为，继续清理其它子项
+            }
           }
-        } catch (_) {}
+        } catch (_) {
+          // 目录枚举失败则放弃清理，不影响登录
+        }
       }
     }
     await Directory(profile).create(recursive: true);
@@ -285,6 +299,7 @@ class KsWebLoginPage {
       try {
         if (!webview.isNavigating.value) break;
       } catch (_) {
+        // 读不到导航状态按"已就绪"处理，直接跳出等待循环
         break;
       }
       await Future.delayed(const Duration(milliseconds: 150));
@@ -300,7 +315,9 @@ class KsWebLoginPage {
         s = s.substring(1, s.length - 1).replaceAll(r'\"', '"');
       }
       return s;
-    } catch (_) {
+    } catch (e) {
+      // 读不到 document.cookie 返回空串，调用方会尝试原生 Cookie；留日志便于排查登录态问题
+      debugPrint('[ks-login] 读取 document.cookie 失败: $e');
       return '';
     }
   }

@@ -133,10 +133,14 @@ $result = @{ ok = $clicked; log = ($log -join "`n") }
     if (bytes.isEmpty) return '';
     try {
       return utf8.decode(bytes);
-    } catch (_) {}
+    } catch (_) {
+      // UTF-8 解码失败继续尝试系统编码，属编码探测的正常回退
+    }
     try {
       return systemEncoding.decode(bytes);
-    } catch (_) {}
+    } catch (_) {
+      // 系统编码也失败则用 latin1 兜底，保证不抛错
+    }
     return latin1.decode(bytes, allowInvalid: true);
   }
 
@@ -197,7 +201,9 @@ if ([WinFocus]::FocusProcess('kwailive')) { 'OK' } else { 'FAIL' }
             jsonDecode(out.substring(jsonStart)) as Map<String, dynamic>;
         return _UiaResult(map['ok'] == true, (map['log'] ?? out).toString());
       }
-    } catch (_) {}
+    } catch (_) {
+      // 输出不是合法 JSON 时退化为字符串匹配，属正常回退分支
+    }
     return _UiaResult(
       out.contains('"ok":true') || out.contains('INVOKED:'),
       out.isEmpty ? 'UIA 无输出 (exit=${r.exitCode})' : out,
@@ -220,7 +226,9 @@ if ([WinFocus]::FocusProcess('kwailive')) { 'OK' } else { 'FAIL' }
       ));
       await beside.parent.create(recursive: true);
       await beside.writeAsBytes([...bom, ...utf8.encode(_uiaScript)]);
-    } catch (_) {}
+    } catch (_) {
+      // 脚本落盘失败时返回原路径，调用方用其它方式拉起直播伴侣
+    }
     return file.path;
   }
 

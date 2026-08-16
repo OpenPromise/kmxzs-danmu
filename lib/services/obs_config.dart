@@ -77,7 +77,9 @@ class OBSConfig {
         try {
           final raw = jsonDecode(await ws.readAsString());
           if (raw is Map) json = Map<String, dynamic>.from(raw);
-        } catch (_) {}
+        } catch (_) {
+          // OBS 配置文件损坏按空配置处理，之后自动写入会覆盖为可用值
+        }
       }
 
       final wasEnabled = json['server_enabled'] == true ||
@@ -146,6 +148,7 @@ class OBSConfig {
       await s.close();
       return true;
     } catch (_) {
+      // 端口探测失败即视为未开启 WebSocket，属正常分支，可安全忽略
       return false;
     }
   }

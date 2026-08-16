@@ -2,6 +2,7 @@ import 'dart:ffi';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart';
 
 /// [E] package:kmxzs/services/native_crypto.dart
 /// [E] crypto_encrypt / crypto_decrypt / crypto_sign / crypto_free
@@ -27,7 +28,9 @@ class NativeCrypto {
           _lib!.lookupFunction<_CryptoNative, _CryptoFn>('crypto_decrypt');
       _sign = _lib!.lookupFunction<_SignNative, _SignFn>('crypto_sign');
       _free = _lib!.lookupFunction<_FreeNative, _FreeFn>('crypto_free');
-    } catch (_) {
+    } catch (e) {
+      // hook.dll 缺失/版本不匹配时静默降级（本地联调或未装扩展环境）
+      debugPrint('[native-crypto] 加载 hook.dll 失败: $e');
       _lib = null;
     }
   }

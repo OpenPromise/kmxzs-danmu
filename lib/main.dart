@@ -111,8 +111,9 @@ class _BootstrapState extends State<_Bootstrap> {
           _home = HomePage(api: api, auth: auth);
         });
         return;
-      } catch (_) {
-        // 自动登录失败 → 登录页
+      } catch (e) {
+        // 自动登录失败 → 登录页；留日志便于排查被拒/过期原因
+        debugPrint('[bootstrap] 自动登录失败，进入登录页: $e');
       }
     }
     if (!mounted) return;
