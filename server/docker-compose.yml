@@ -1,0 +1,60 @@
+# ============================================================
+# kmxzs 卡密服务 — Ubuntu 生产环境
+# 用法：
+#   cp .env.example .env
+#   nano .env          # 必填 KMXZS_API_SECRET
+#   docker compose up -d --build
+# ============================================================
+
+name: kmxzs-server
+
+services:
+  kmxzs-card:
+    build: .
+    image: kmxzs-card-server:1.3.0
+    container_name: kmxzs-card-server
+    ports:
+      # 宿主机端口:容器端口（HTTP，无域名直接用 IP:18088）
+      - "${KMXZS_HOST_PORT:-18088}:18080"
+    env_file:
+      - .env
+    environment:
+      KMXZS_DB: /data/kmxzs.db
+      KMXZS_ADMIN_TOKEN_FILE: /data/admin_token.txt
+      KMXZS_PRODUCTION: "1"
+      KMXZS_SEED_DEMO: "0"
+      KMXZS_REQUIRE_SIGN: "1"
+      # 下列可由 .env 覆盖；未设置时用这里的默认值
+      KMXZS_ADMIN_TOKEN: ${KMXZS_ADMIN_TOKEN:-}
+      KMXZS_ADMIN_PATH: ${KMXZS_ADMIN_PATH:-/zbpanel}
+      KMXZS_ADMIN_USER: ${KMXZS_ADMIN_USER:-zbxzs}
+      KMXZS_ADMIN_PASSWORD: ${KMXZS_ADMIN_PASSWORD:-}
+      KMXZS_API_SECRET: ${KMXZS_API_SECRET:?请先在 .env 设置 KMXZS_API_SECRET}
+      KMXZS_MAX_DEVICES: ${KMXZS_MAX_DEVICES:-1}
+      KMXZS_UNBIND_PENALTY_HOURS: ${KMXZS_UNBIND_PENALTY_HOURS:-12}
+      KMXZS_LOGIN_RATE_LIMIT: ${KMXZS_LOGIN_RATE_LIMIT:-10}
+      KMXZS_LOGIN_RATE_WINDOW: ${KMXZS_LOGIN_RATE_WINDOW:-900}
+      KMXZS_CORS_ORIGINS: ${KMXZS_CORS_ORIGINS:-}
+      KMXZS_CLIENT_VERSION: ${KMXZS_CLIENT_VERSION:-1.0.0}
+      KMXZS_MIN_CLIENT_VERSION: ${KMXZS_MIN_CLIENT_VERSION:-1.0.0}
+      KMXZS_FORCE_UPDATE: ${KMXZS_FORCE_UPDATE:-0}
+      KMXZS_DOWNLOAD_URL: ${KMXZS_DOWNLOAD_URL:-}
+      KMXZS_TRUST_PROXY: ${KMXZS_TRUST_PROXY:-0}
+    volumes:
+      - kmxzs_card_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18080/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  kmxzs_card_data:

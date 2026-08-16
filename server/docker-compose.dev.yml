@@ -1,0 +1,34 @@
+# 本地联调（含演示卡）。Ubuntu 正式环境请用 docker-compose.yml + .env
+services:
+  kmxzs-card:
+    build: .
+    image: kmxzs-card-server:dev
+    container_name: kmxzs-card-server
+    ports:
+      - "18088:18080"
+    environment:
+      KMXZS_DB: /data/kmxzs.db
+      KMXZS_ADMIN_TOKEN_FILE: /data/admin_token.txt
+      KMXZS_ADMIN_TOKEN: ""
+      KMXZS_ADMIN_PATH: /zbpanel
+      KMXZS_ADMIN_USER: zbxzs
+      KMXZS_ADMIN_PASSWORD: ""
+      KMXZS_SEED_DEMO: "1"
+      KMXZS_PRODUCTION: "0"
+      KMXZS_REQUIRE_SIGN: "0"
+      KMXZS_API_SECRET: ""
+      KMXZS_MAX_DEVICES: "1"
+      KMXZS_UNBIND_PENALTY_HOURS: "12"
+      KMXZS_LOGIN_RATE_LIMIT: "20"
+      KMXZS_LOGIN_RATE_WINDOW: "900"
+      KMXZS_CORS_ORIGINS: "*"
+      KMXZS_CLIENT_VERSION: "1.0.0"
+      KMXZS_MIN_CLIENT_VERSION: "1.0.0"
+      KMXZS_FORCE_UPDATE: "0"
+      KMXZS_DOWNLOAD_URL: ""
+    volumes:
+      - kmxzs_card_data_dev:/data
+    restart: unless-stopped
+
+volumes:
+  kmxzs_card_data_dev:

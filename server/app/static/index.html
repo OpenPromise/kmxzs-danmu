@@ -1,0 +1,848 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>快马小助手 · 卡密管理</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #171d25;
+      --panel-2: #1e2630;
+      --line: #2a3441;
+      --text: #e8eef6;
+      --muted: #93a1b3;
+      --accent: #3d9cf0;
+      --accent-2: #1f6feb;
+      --ok: #3fb950;
+      --warn: #d29922;
+      --bad: #f85149;
+      --shadow: 0 10px 30px rgba(0,0,0,.28);
+      --radius: 14px;
+      --font: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: Consolas, "Cascadia Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--font);
+      color: var(--text);
+      background:
+        radial-gradient(1200px 500px at 10% -10%, rgba(61,156,240,.18), transparent 55%),
+        radial-gradient(900px 400px at 100% 0%, rgba(31,111,235,.12), transparent 50%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    a { color: var(--accent); }
+    button, input, select, textarea { font: inherit; }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+    .top {
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      margin-bottom: 22px;
+    }
+    .brand h1 { margin: 0; font-size: 22px; letter-spacing: .2px; }
+    .brand p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+    .card {
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+    }
+    .login-box {
+      max-width: 420px; margin: 12vh auto 0; padding: 28px;
+    }
+    .login-box h2 { margin: 0 0 8px; font-size: 20px; }
+    .login-box p { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+    label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+    .field { margin-bottom: 14px; }
+    input, select, textarea {
+      width: 100%;
+      background: #0c1117;
+      border: 1px solid var(--line);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 10px 12px;
+      outline: none;
+    }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); }
+    .btn {
+      border: 0; border-radius: 10px; padding: 10px 14px; cursor: pointer;
+      background: var(--accent-2); color: white; font-weight: 600;
+    }
+    .btn:hover { filter: brightness(1.08); }
+    .btn.ghost {
+      background: transparent; color: var(--text); border: 1px solid var(--line);
+    }
+    .btn.danger { background: #8b1e1e; }
+    .btn.ok { background: #1f6a35; }
+    .btn.sm { padding: 6px 10px; font-size: 12px; font-weight: 500; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    .row > * { flex: 1; min-width: 140px; }
+    .stats {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px;
+    }
+    .stat { padding: 16px 18px; }
+    .stat .k { color: var(--muted); font-size: 12px; }
+    .stat .v { font-size: 26px; font-weight: 700; margin-top: 6px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tab {
+      border: 1px solid var(--line); background: transparent; color: var(--muted);
+      border-radius: 999px; padding: 8px 14px; cursor: pointer;
+    }
+    .tab.active { color: white; border-color: var(--accent); background: rgba(61,156,240,.15); }
+    .panel { padding: 16px; margin-bottom: 14px; }
+    .panel h3 { margin: 0 0 12px; font-size: 15px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    .mono { font-family: var(--mono); }
+    .tag {
+      display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px;
+      border: 1px solid var(--line);
+    }
+    .tag.login { color: #79c0ff; border-color: #2f5f8f; }
+    .tag.topup { color: #d2a8ff; border-color: #6e40c9; }
+    .tag.on { color: var(--ok); border-color: #246b38; }
+    .tag.off { color: var(--bad); border-color: #8b1e1e; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .toast {
+      position: fixed; left: 50%; top: 50%;
+      transform: translate(-50%, -50%) scale(.96);
+      background: #111827; border: 1px solid var(--line);
+      color: var(--text); padding: 16px 22px; border-radius: 12px; box-shadow: var(--shadow);
+      opacity: 0; transition: .2s; pointer-events: none; z-index: 50;
+      max-width: min(420px, calc(100vw - 32px));
+      text-align: center; font-size: 15px; line-height: 1.5;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    .modal-mask {
+      position: fixed; inset: 0; background: rgba(0,0,0,.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 60; padding: 20px;
+    }
+    .modal {
+      width: min(460px, 100%);
+      background: linear-gradient(180deg, var(--panel), var(--panel-2));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px 20px 16px;
+    }
+    .modal h4 { margin: 0 0 8px; font-size: 16px; }
+    .modal p { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.55; white-space: pre-wrap; word-break: break-all; }
+    .modal .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .hidden { display: none !important; }
+    .created-box {
+      margin-top: 12px; padding: 12px; border-radius: 10px; background: #0c1117;
+      border: 1px dashed var(--line); white-space: pre-wrap; font-family: var(--mono); font-size: 12px;
+      user-select: text; -webkit-user-select: text;
+    }
+    body, td, th, .mono, input, textarea { user-select: text; -webkit-user-select: text; }
+    @media (max-width: 900px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div id="loginView" class="wrap">
+    <div class="card login-box">
+      <h2>卡密管理后台</h2>
+      <p>已通过浏览器账号验证。点击下方进入管理台。<br/>开发商：桦中科技</p>
+      <button class="btn" id="loginBtn" style="width:100%">进入管理台</button>
+      <p style="margin-top:14px;font-size:12px;color:var(--muted)">
+        地址：<span class="mono" id="baseHint"></span>
+      </p>
+    </div>
+  </div>
+
+  <div id="appView" class="wrap hidden">
+    <div class="top">
+      <div class="brand">
+        <h1>快马小助手 · 卡密管理</h1>
+        <p>发卡 / 启停 / 设备 / 续期 · 开发商：桦中科技</p>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="refreshBtn">刷新</button>
+        <button class="btn ghost" id="logoutBtn">退出</button>
+      </div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="cards">卡密</button>
+      <button class="tab" data-tab="accounts">账号</button>
+      <button class="tab" data-tab="devices">设备</button>
+      <button class="tab" data-tab="create">发卡</button>
+      <button class="tab" data-tab="channels">渠道</button>
+      <button class="tab" data-tab="logs">日志</button>
+      <button class="tab" data-tab="settings">客户端配置</button>
+    </div>
+
+    <section id="tab-cards" class="card panel">
+      <div class="row" style="margin-bottom:12px">
+        <div>
+          <label>类型</label>
+          <select id="filterKind">
+            <option value="">全部</option>
+            <option value="login">登录卡</option>
+            <option value="topup">充值卡</option>
+          </select>
+        </div>
+        <div>
+          <label>状态</label>
+          <select id="filterEnabled">
+            <option value="">全部</option>
+            <option value="1">启用</option>
+            <option value="0">禁用</option>
+          </select>
+        </div>
+        <div style="flex:2">
+          <label>搜索</label>
+          <input id="filterQ" placeholder="卡密 / 备注" />
+        </div>
+        <div style="flex:0">
+          <label>&nbsp;</label>
+          <button class="btn" id="searchBtn">查询</button>
+        </div>
+        <div style="flex:0">
+          <label>&nbsp;</label>
+          <button class="btn ghost" id="exportBtn">导出 CSV</button>
+        </div>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr>
+              <th>卡密</th><th>类型</th><th>时长</th><th>设备</th><th>状态</th><th>备注</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="cardsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-accounts" class="card panel hidden">
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr><th>卡密/账号</th><th>到期</th><th>设备数</th><th>更新时间</th><th>操作</th></tr>
+          </thead>
+          <tbody id="accountsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-devices" class="card panel hidden">
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>卡密</th><th>设备</th><th>绑定时间</th><th>操作</th></tr>
+          </thead>
+          <tbody id="devicesBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-create" class="card panel hidden">
+      <h3>批量发卡</h3>
+      <div class="row">
+        <div>
+          <label>类型</label>
+          <select id="createKind">
+            <option value="login">登录卡</option>
+            <option value="topup">充值卡</option>
+          </select>
+        </div>
+        <div>
+          <label>时长（小时）</label>
+          <input id="createHours" type="number" value="720" />
+        </div>
+        <div>
+          <label>最大设备数</label>
+          <input id="createMaxDevices" type="number" value="1" />
+        </div>
+        <div>
+          <label>数量</label>
+          <input id="createCount" type="number" value="1" min="1" max="200" />
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <div style="flex:2">
+          <label>指定卡密（可选，留空自动生成）</label>
+          <input id="createCode" placeholder="例如 KMXZS-VIP-001" />
+        </div>
+        <div style="flex:2">
+          <label>备注 / 渠道</label>
+          <input id="createNote" placeholder="渠道 / 用途" />
+        </div>
+      </div>
+      <div style="margin-top:14px" class="actions">
+        <button class="btn" id="createBtn">生成卡密</button>
+        <button class="btn ghost" id="copyCreatedBtn">复制结果</button>
+      </div>
+      <div id="createdOut" class="created-box hidden"></div>
+    </section>
+
+    <section id="tab-channels" class="card panel hidden">
+      <h3>渠道 / 备注统计</h3>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>渠道备注</th><th>卡密数量</th></tr></thead>
+          <tbody id="channelsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-logs" class="card panel hidden">
+      <div class="row" style="margin-bottom:12px">
+        <div>
+          <label>动作过滤</label>
+          <input id="logAction" placeholder="如 login_ok / create_cards" />
+        </div>
+        <div style="flex:0">
+          <label>&nbsp;</label>
+          <button class="btn" id="logSearchBtn">查询日志</button>
+        </div>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead>
+            <tr><th>时间</th><th>动作</th><th>主体</th><th>目标</th><th>IP</th><th>结果</th><th>详情</th></tr>
+          </thead>
+          <tbody id="logsBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="card panel hidden">
+      <h3>客户端远程配置</h3>
+      <p style="margin:0 0 14px;color:var(--muted);font-size:13px">
+        登录页公告、版本检查与强制更新均从这里下发。
+      </p>
+      <div class="field">
+        <label>公告 notice</label>
+        <textarea id="setNotice" rows="3" placeholder="显示在客户端登录/主页顶部"></textarea>
+      </div>
+      <div class="row">
+        <div>
+          <label>最新版本号</label>
+          <input id="setClientVersion" placeholder="1.0.1" />
+        </div>
+        <div>
+          <label>最低可用版本</label>
+          <input id="setMinVersion" placeholder="1.0.0" />
+        </div>
+        <div>
+          <label>强制更新</label>
+          <select id="setForce">
+            <option value="0">否</option>
+            <option value="1">是</option>
+          </select>
+        </div>
+      </div>
+      <div class="field" style="margin-top:10px">
+        <label>下载地址（始终指向当前最高版本，旧客户端一次更新到位）</label>
+        <div class="row">
+          <input id="setDownload" readonly />
+          <div style="flex:0">
+            <button class="btn ghost" type="button" id="copyDownloadBtn">复制地址</button>
+          </div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label>上传新版安装包（.exe）</label>
+        <input id="releaseFile" type="file" accept=".exe,application/x-msdownload" />
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12px;line-height:1.5">
+          填写本次安装包的版本号（例如 1.0.2）后上传。系统会按版本号取最高的一份作为最新包；
+          1.0.0 用户会直接下载最新包，不会先装 1.0.1 再装 1.0.2。
+        </p>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn" id="saveSettingsBtn">保存配置</button>
+        <button class="btn" id="uploadReleaseBtn">上传并发布</button>
+        <button class="btn ghost" id="reloadSettingsBtn">重新加载</button>
+      </div>
+      <div id="releaseList" class="created-box" style="display:none"></div>
+    </section>
+  </div>
+
+  <div id="toast" class="toast"></div>
+  <div id="modalMask" class="modal-mask hidden">
+    <div class="modal">
+      <h4 id="modalTitle">确认</h4>
+      <p id="modalMsg"></p>
+      <div class="modal-actions">
+        <button class="btn ghost" type="button" id="modalCancel">取消</button>
+        <button class="btn" type="button" id="modalOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ADMIN_BASE = "__ADMIN_BASE__";
+    const $ = (id) => document.getElementById(id);
+    const baseHint = location.origin;
+    $("baseHint").textContent = baseHint + ADMIN_BASE + "/";
+
+    let lastCreated = [];
+
+    function toast(msg, ms) {
+      const el = $("toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove("show"), ms || 2800);
+    }
+
+    function ask({ title, message, okText, cancelText, danger }) {
+      return new Promise((resolve) => {
+        const mask = $("modalMask");
+        $("modalTitle").textContent = title || "请确认";
+        $("modalMsg").textContent = message || "";
+        $("modalOk").textContent = okText || "确定";
+        $("modalCancel").textContent = cancelText || "取消";
+        $("modalOk").className = "btn" + (danger ? " danger" : "");
+        mask.classList.remove("hidden");
+        const done = (ok) => {
+          mask.classList.add("hidden");
+          $("modalOk").onclick = null;
+          $("modalCancel").onclick = null;
+          mask.onclick = null;
+          resolve(ok);
+        };
+        $("modalOk").onclick = () => done(true);
+        $("modalCancel").onclick = () => done(false);
+        mask.onclick = (e) => { if (e.target === mask) done(false); };
+      });
+    }
+
+    async function api(path, options = {}) {
+      const headers = Object.assign(
+        { "Content-Type": "application/json" },
+        options.headers || {}
+      );
+      const res = await fetch(path, { ...options, headers, credentials: "same-origin" });
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      if (res.status === 401) {
+        logout(false);
+        throw new Error("账号密码无效，请刷新页面重新登录");
+      }
+      if (!res.ok) {
+        const msg = (data && (data.message || data.detail?.message || data.detail)) || ("HTTP " + res.status);
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      if (data && typeof data.code === "number" && data.code !== 0 && data.code !== 200) {
+        throw new Error(data.message || data.msg || "请求失败");
+      }
+      return data;
+    }
+
+    function hoursLabel(h) {
+      if (h % 24 === 0) return (h / 24) + " 天";
+      return h + " 小时";
+    }
+
+    function showApp(ok) {
+      $("loginView").classList.toggle("hidden", ok);
+      $("appView").classList.toggle("hidden", !ok);
+    }
+
+    function logout(_clear = true) {
+      showApp(false);
+      toast("关闭浏览器窗口即可退出登录");
+    }
+
+    async function login() {
+      await api(ADMIN_BASE + "/overview");
+      showApp(true);
+      await refreshAll();
+      toast("已进入管理台");
+    }
+
+    function setTab(name) {
+      document.querySelectorAll(".tab").forEach((t) => {
+        t.classList.toggle("active", t.dataset.tab === name);
+      });
+      ["cards", "accounts", "devices", "create", "channels", "logs", "settings"].forEach((n) => {
+        $("tab-" + n).classList.toggle("hidden", n !== name);
+      });
+      if (name === "logs") loadLogs().catch((e) => toast(e.message));
+      if (name === "channels") loadChannels().catch((e) => toast(e.message));
+      if (name === "settings") loadSettings().catch((e) => toast(e.message));
+    }
+
+    async function loadSettings() {
+      const r = await api(ADMIN_BASE + "/settings");
+      const pub = (r.data && r.data.public) || {};
+      $("setNotice").value = pub.notice || "";
+      $("setClientVersion").value = pub.version || "1.0.0";
+      $("setMinVersion").value = pub.minVersion || "1.0.0";
+      $("setDownload").value = pub.download || "";
+      $("setForce").value = pub.force ? "1" : "0";
+      await loadReleases();
+    }
+
+    async function loadReleases() {
+      try {
+        const r = await api(ADMIN_BASE + "/releases");
+        const files = (r.data && r.data.files) || [];
+        const box = $("releaseList");
+        if (!files.length) {
+          box.style.display = "none";
+          box.textContent = "";
+          return;
+        }
+        box.style.display = "block";
+        box.textContent = files.map((f) => {
+          const mb = (f.size / 1048576).toFixed(2);
+          return `${f.name}  ${mb} MB\n${f.url}`;
+        }).join("\n\n");
+      } catch (_) {}
+    }
+
+    async function uploadRelease() {
+      const input = $("releaseFile");
+      const f = input.files && input.files[0];
+      if (!f) throw new Error("请先选择 .exe 安装包");
+      const ver = $("setClientVersion").value.trim();
+      if (!/^\d+\.\d+\.\d+$/.test(ver)) throw new Error("请先填写最新版本号，例如 1.0.1");
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("version", ver);
+      fd.append("force_update", $("setForce").value);
+      toast("正在上传安装包…");
+      const res = await fetch(ADMIN_BASE + "/releases", {
+        method: "POST",
+        body: fd,
+        credentials: "same-origin",
+      });
+      let data = null;
+      try { data = await res.json(); } catch (_) {}
+      if (res.status === 401) throw new Error("账号密码无效，请刷新页面重新登录");
+      if (!res.ok) {
+        const msg = (data && (data.message || data.detail?.message || data.detail)) || ("HTTP " + res.status);
+        throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+      }
+      toast("已发布 " + (data && data.data && data.data.version ? data.data.version : ver) + "，所有旧版本会直接下载当前最新包");
+      input.value = "";
+      await loadSettings();
+    }
+
+    async function saveSettings() {
+      const body = {
+        notice: $("setNotice").value,
+        client_version: $("setClientVersion").value.trim(),
+        min_client_version: $("setMinVersion").value.trim(),
+        force_update: $("setForce").value === "1",
+      };
+      await api(ADMIN_BASE + "/settings", { method: "PUT", body: JSON.stringify(body) });
+      toast("客户端配置已保存");
+      await loadSettings();
+    }
+
+    async function loadOverview() {
+      const r = await api(ADMIN_BASE + "/overview");
+      const d = r.data || {};
+      window._channels = d.channels || [];
+      $("stats").innerHTML = [
+        ["卡密总数", d.cardsTotal],
+        ["可用登录卡", d.cardsLoginEnabled],
+        ["可用充值卡", d.cardsTopupEnabled],
+        ["已激活账号", d.accounts],
+        ["绑定设备", d.devices],
+        ["在线会话", d.sessions],
+        ["已用充值卡", d.topupUsed],
+      ].map(([k, v]) => `<div class="card stat"><div class="k">${k}</div><div class="v">${v ?? 0}</div></div>`).join("");
+    }
+
+    async function loadChannels() {
+      const rows = window._channels || [];
+      if (!rows.length) {
+        const r = await api(ADMIN_BASE + "/overview");
+        window._channels = (r.data && r.data.channels) || [];
+      }
+      const list = window._channels || [];
+      $("channelsBody").innerHTML = list.map((c) => `<tr>
+        <td>${escapeHtml(c.name)}</td>
+        <td>${c.count}</td>
+      </tr>`).join("") || `<tr><td colspan="2" style="color:var(--muted)">暂无数据</td></tr>`;
+    }
+
+    async function loadLogs() {
+      const action = $("logAction").value.trim();
+      const qs = new URLSearchParams({ limit: "150" });
+      if (action) qs.set("action", action);
+      const r = await api(ADMIN_BASE + "/logs?" + qs.toString());
+      const rows = r.data || [];
+      $("logsBody").innerHTML = rows.map((l) => `<tr>
+        <td>${escapeHtml(l.created_at || "")}</td>
+        <td class="mono">${escapeHtml(l.action || "")}</td>
+        <td class="mono">${escapeHtml(l.actor || "")}</td>
+        <td class="mono">${escapeHtml(l.target || "")}</td>
+        <td>${escapeHtml(l.ip || "")}</td>
+        <td><span class="tag ${l.ok ? "on" : "off"}">${l.ok ? "OK" : "FAIL"}</span></td>
+        <td class="mono" style="max-width:280px;word-break:break-all">${escapeHtml(l.detail || "")}</td>
+      </tr>`).join("") || `<tr><td colspan="7" style="color:var(--muted)">暂无日志</td></tr>`;
+    }
+
+    async function exportCards() {
+      const kind = $("filterKind").value;
+      const enabled = $("filterEnabled").value;
+      const q = $("filterQ").value.trim();
+      const qs = new URLSearchParams();
+      if (kind) qs.set("kind", kind);
+      if (enabled !== "") qs.set("enabled", enabled);
+      if (q) qs.set("q", q);
+      const res = await fetch(ADMIN_BASE + "/cards/export?" + qs.toString(), {
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error("导出失败 HTTP " + res.status);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "kmxzs-cards.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+      toast("已导出 CSV");
+    }
+
+    async function loadCards() {
+      const kind = $("filterKind").value;
+      const enabled = $("filterEnabled").value;
+      const q = $("filterQ").value.trim();
+      const qs = new URLSearchParams();
+      if (kind) qs.set("kind", kind);
+      if (enabled !== "") qs.set("enabled", enabled);
+      if (q) qs.set("q", q);
+      const r = await api(ADMIN_BASE + "/cards?" + qs.toString());
+      const rows = r.data || [];
+      $("cardsBody").innerHTML = rows.map((c) => {
+        const used = c.topup_used ? " · 已用" : "";
+        return `<tr>
+          <td class="mono">${escapeHtml(c.code)}</td>
+          <td><span class="tag ${c.kind}">${c.kind === "login" ? "登录" : "充值"}${used}</span></td>
+          <td>${hoursLabel(c.hours)}</td>
+          <td>${c.device_count || 0}/${c.max_devices}</td>
+          <td><span class="tag ${c.enabled ? "on" : "off"}">${c.enabled ? "启用" : "禁用"}</span></td>
+          <td>${escapeHtml(c.note || "")}</td>
+          <td class="actions">
+            <button class="btn sm ghost" type="button" data-copy="${escapeHtml(c.code)}">复制</button>
+            <button class="btn sm ${c.enabled ? "danger" : "ok"}" onclick="toggleCard('${escapeAttr(c.code)}', ${c.enabled ? 0 : 1})">${c.enabled ? "禁用" : "启用"}</button>
+            <button class="btn sm danger" onclick="deleteCard('${escapeAttr(c.code)}')">删除</button>
+          </td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="7" style="color:var(--muted)">暂无卡密</td></tr>`;
+    }
+
+    async function loadAccounts() {
+      const r = await api(ADMIN_BASE + "/accounts");
+      const rows = r.data || [];
+      $("accountsBody").innerHTML = rows.map((a) => `<tr>
+        <td class="mono">${escapeHtml(a.card)} <button class="btn sm ghost" type="button" data-copy="${escapeHtml(a.card)}">复制</button></td>
+        <td>${escapeHtml(a.expires_at || "")}</td>
+        <td>${a.device_count || 0}</td>
+        <td>${escapeHtml(a.updated_at || "")}</td>
+        <td class="actions">
+          <button class="btn sm" onclick="extendAccount('${escapeAttr(a.card)}', 24)">+24h</button>
+          <button class="btn sm ghost" onclick="extendAccount('${escapeAttr(a.card)}', 168)">+7天</button>
+        </td>
+      </tr>`).join("") || `<tr><td colspan="5" style="color:var(--muted)">暂无账号</td></tr>`;
+    }
+
+    async function loadDevices() {
+      const r = await api(ADMIN_BASE + "/devices");
+      const rows = r.data || [];
+      $("devicesBody").innerHTML = rows.map((d) => `<tr>
+        <td>${d.id}</td>
+        <td class="mono">${escapeHtml(d.card)}</td>
+        <td class="mono">${escapeHtml(d.device_id)}</td>
+        <td>${escapeHtml(d.bound_at || "")}</td>
+        <td><button class="btn sm danger" onclick="deleteDevice(${d.id})">解绑</button></td>
+      </tr>`).join("") || `<tr><td colspan="5" style="color:var(--muted)">暂无设备</td></tr>`;
+    }
+
+    async function refreshAll() {
+      await loadOverview();
+      await loadCards();
+      await loadAccounts();
+      await loadDevices();
+      await loadChannels();
+      await loadLogs();
+    }
+
+    async function toggleCard(code, enabled) {
+      try {
+        const ok = await ask({
+          title: enabled ? "启用卡密" : "禁用卡密",
+          message: enabled
+            ? ("确认启用这张卡密？启用后可以继续登录。\n\n" + code)
+            : ("确认禁用这张卡密？禁用后将无法登录，已在线的会话会在下次校验时失效。\n\n" + code),
+          okText: enabled ? "确认启用" : "确认禁用",
+          danger: !enabled,
+        });
+        if (!ok) return;
+        await api(ADMIN_BASE + "/cards/" + encodeURIComponent(code), {
+          method: "PATCH",
+          body: JSON.stringify({ enabled: !!enabled }),
+        });
+        toast((enabled ? "已启用卡密：" : "已禁用卡密：") + code, 4000);
+        await loadCards();
+        await loadOverview();
+      } catch (e) {
+        toast(e.message || String(e));
+      }
+    }
+
+    async function deleteCard(code) {
+      try {
+        const ok = await ask({
+          title: "删除卡密",
+          message: "确认删除这张卡密？对应账号和设备绑定会一并删除，且不可恢复。\n\n" + code,
+          okText: "确认删除",
+          danger: true,
+        });
+        if (!ok) return;
+        await api(ADMIN_BASE + "/cards/" + encodeURIComponent(code), { method: "DELETE" });
+        toast("已删除卡密：" + code, 4000);
+        await refreshAll();
+      } catch (e) {
+        toast(e.message || String(e));
+      }
+    }
+
+    async function extendAccount(card, hours) {
+      try {
+        await api(ADMIN_BASE + "/accounts/" + encodeURIComponent(card) + "/extend", {
+          method: "POST",
+          body: JSON.stringify({ hours }),
+        });
+        toast("已续期 +" + hours + "h");
+        await loadAccounts();
+      } catch (e) {
+        toast(e.message || String(e));
+      }
+    }
+
+    async function deleteDevice(id) {
+      try {
+        const ok = await ask({
+          title: "解绑设备",
+          message: "确认解绑该设备？解绑后该设备需要重新登录。",
+          okText: "确认解绑",
+          danger: true,
+        });
+        if (!ok) return;
+        await api(ADMIN_BASE + "/devices/" + id, { method: "DELETE" });
+        toast("已解绑");
+        await loadDevices();
+        await loadOverview();
+      } catch (e) {
+        toast(e.message || String(e));
+      }
+    }
+
+    async function createCards() {
+      const body = {
+        kind: $("createKind").value,
+        hours: Number($("createHours").value || 720),
+        max_devices: Number($("createMaxDevices").value || 1),
+        count: Number($("createCount").value || 1),
+        code: $("createCode").value.trim() || null,
+        note: $("createNote").value.trim() || null,
+      };
+      const r = await api(ADMIN_BASE + "/cards", { method: "POST", body: JSON.stringify(body) });
+      lastCreated = (r.data && r.data.cards) || [];
+      $("createdOut").classList.remove("hidden");
+      $("createdOut").textContent = lastCreated.join("\n");
+      toast("已生成 " + lastCreated.length + " 张");
+      $("createCode").value = "";
+      await refreshAll();
+      setTab("cards");
+    }
+
+    function copyText(text) {
+      text = String(text || "");
+      if (!text) {
+        toast("没有可复制内容");
+        return;
+      }
+      const done = (ok) => {
+        if (!ok) {
+          toast("复制失败，请选中文本后按 Ctrl+C");
+          return;
+        }
+        const lines = text.split(/\r?\n/).filter(Boolean);
+        if (lines.length > 1) {
+          toast("已复制 " + lines.length + " 张卡密", 4000);
+        } else if (text.startsWith("http")) {
+          toast("已复制下载地址", 3200);
+        } else {
+          toast("已复制卡密：" + text, 4000);
+        }
+      };
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => done(true)).catch(() => copyFallback(text, done));
+        return;
+      }
+      copyFallback(text, done);
+    }
+
+    function copyFallback(text, done) {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText = "position:fixed;left:8px;top:8px;width:1px;height:1px;opacity:0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+      (done || ((v) => toast(v ? "已复制" : "复制失败，请选中文本后按 Ctrl+C")))(ok);
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"
+      }[c]));
+    }
+    function escapeAttr(s) {
+      return String(s).replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    }
+
+    $("loginBtn").onclick = () => login().catch((e) => toast(e.message));
+    $("logoutBtn").onclick = () => logout(true);
+    $("refreshBtn").onclick = () => refreshAll().then(() => toast("已刷新")).catch((e) => toast(e.message));
+    $("searchBtn").onclick = () => loadCards().catch((e) => toast(e.message));
+    $("exportBtn").onclick = () => exportCards().catch((e) => toast(e.message));
+    $("logSearchBtn").onclick = () => loadLogs().catch((e) => toast(e.message));
+    $("createBtn").onclick = () => createCards().catch((e) => toast(e.message));
+    $("saveSettingsBtn").onclick = () => saveSettings().catch((e) => toast(e.message));
+    $("uploadReleaseBtn").onclick = () => uploadRelease().catch((e) => toast(e.message));
+    $("reloadSettingsBtn").onclick = () => loadSettings().catch((e) => toast(e.message));
+    $("copyCreatedBtn").onclick = () => {
+      if (!lastCreated.length) return toast("暂无生成结果");
+      copyText(lastCreated.join("\n"));
+    };
+    $("copyDownloadBtn").onclick = () => {
+      const url = $("setDownload").value.trim();
+      if (!url) return toast("还没有下载地址");
+      copyText(url);
+    };
+    document.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-copy]");
+      if (!el) return;
+      copyText(el.getAttribute("data-copy") || "");
+    });
+    document.querySelectorAll(".tab").forEach((t) => {
+      t.onclick = () => setTab(t.dataset.tab);
+    });
+
+    login().catch(() => showApp(false));
+  </script>
+</body>
+</html>

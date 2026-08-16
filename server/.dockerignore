@@ -1,0 +1,16 @@
+# 不要把本地 venv / 数据库 / 密钥打进镜像
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+data/
+*.db
+.env
+.env.local
+*.md
+.git/
+.gitignore
+docker-compose*.yml
+.env.example
