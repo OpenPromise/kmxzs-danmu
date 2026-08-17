@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kmxzs/pages/ks_web_pull_page.dart';
 import 'package:kmxzs/services/flv_extractor.dart';
 
 /// 快手解析相关纯本地单测：只做字符串/JSON 解析，不打任何外网。
@@ -111,6 +112,109 @@ window.__INITIAL_STATE__={"liveStream":{"errorType":{"title":"操作频繁","con
       final r = FlvExtractor.ksParseInitialStateHtml(html);
       expect(r.rateLimited, isTrue);
       expect(r.livingTrue, isTrue);
+    });
+  });
+
+  group('KsWebPullPage.hrefIsTargetRoom', () {
+    test('必须是 /u/房间号，不能拿其它直播间的残留页', () {
+      expect(
+        KsWebPullPage.hrefIsTargetRoom(
+          'https://live.kuaishou.com/u/majiangsaishi',
+          'majiangsaishi',
+        ),
+        isTrue,
+      );
+      expect(
+        KsWebPullPage.hrefIsTargetRoom(
+          'https://live.kuaishou.com/u/majiangsaishi?param=1',
+          'majiangsaishi',
+        ),
+        isTrue,
+      );
+      expect(
+        KsWebPullPage.hrefIsTargetRoom(
+          'https://live.kuaishou.com/u/otherroom',
+          'majiangsaishi',
+        ),
+        isFalse,
+      );
+      expect(
+        KsWebPullPage.hrefIsTargetRoom(
+          'https://live.kuaishou.com/',
+          'majiangsaishi',
+        ),
+        isFalse,
+      );
+    });
+
+    test('数字用户 ID 与房间短号并存时不算进错房', () {
+      expect(
+        KsWebPullPage.principalMatchesRoom('123456789', 'majiangsaishi'),
+        isTrue,
+      );
+      expect(
+        KsWebPullPage.principalMatchesRoom('majiangsaishi', 'majiangsaishi'),
+        isTrue,
+      );
+      expect(
+        KsWebPullPage.principalMatchesRoom('otherroom', 'majiangsaishi'),
+        isFalse,
+      );
+    });
+  });
+
+  group('KsWebPullPage.pickCurrentRoomUrls', () {
+    const href = 'https://live.kuaishou.com/u/3xv3remku8txrpa';
+    const mine =
+        'https://tx-origin.pull.yximgs.com/gifshow/CURRENT_GameAvcHdL0.flv?x=1';
+    const other =
+        'https://tx-origin.pull.yximgs.com/gifshow/OTHER_GameAvcHdL0.flv?x=1';
+
+    test('只取 author.id 等于房间号的那一项，丢掉推荐位', () {
+      final urls = KsWebPullPage.pickCurrentRoomUrls(
+        rid: '3xv3remku8txrpa',
+        href: href,
+        items: [
+          (principalId: '3xv3remku8txrpa', urls: [mine]),
+          (principalId: 'cncs2020', urls: [other]),
+        ],
+      );
+      expect(urls, [mine]);
+    });
+
+    test('当前房间还没有地址时，不得用推荐位的流顶上', () {
+      final urls = KsWebPullPage.pickCurrentRoomUrls(
+        rid: '3xv3remku8txrpa',
+        href: href,
+        items: [
+          (principalId: '', urls: []),
+          (principalId: 'cncs2020', urls: [other]),
+        ],
+      );
+      expect(urls, isEmpty);
+    });
+
+    test('地址栏已是该房间且当前项有地址、作者暂时为空时，仍取当前项', () {
+      final urls = KsWebPullPage.pickCurrentRoomUrls(
+        rid: '3xv3remku8txrpa',
+        href: href,
+        activeIndex: 0,
+        items: [
+          (principalId: '', urls: [mine]),
+          (principalId: 'cncs2020', urls: [other]),
+        ],
+      );
+      expect(urls, [mine]);
+    });
+
+    test('地址栏已是该房间且播放器已请求 flv 时，可用这条', () {
+      final urls = KsWebPullPage.pickCurrentRoomUrls(
+        rid: '3xv3remku8txrpa',
+        href: href,
+        items: const [],
+        extraUrls: [mine],
+      );
+      expect(urls, [mine]);
     });
   });
 }

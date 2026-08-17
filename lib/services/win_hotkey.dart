@@ -59,6 +59,67 @@ class WinHotkey {
     return _focusHwnd(hwnd);
   }
 
+  /// 把标题包含 [titlePart] 的窗口提到桌面最前并保持置顶。
+  /// 滑块窗口要用这个：普通 SetForegroundWindow 会被 OBS/伴侣盖住。
+  static bool raiseTopmostByTitle(String titlePart) {
+    if (!isSupported) return false;
+    final needle = titlePart.trim();
+    if (needle.isEmpty) return false;
+    final hwnd = _findVisibleHwndByTitle(needle);
+    if (hwnd == 0) return false;
+    _a.allowSetForegroundWindow(_asfwAny);
+    if (_a.isIconic(hwnd) != 0) {
+      _a.showWindow(hwnd, _swRestore);
+    }
+    _a.showWindow(hwnd, _swShow);
+    final fg = _a.getForegroundWindow();
+    final pidPtr = calloc<Uint32>();
+    try {
+      final fgTid = fg == 0 ? 0 : _a.getWindowThreadProcessId(fg, pidPtr);
+      final curTid = _a.getCurrentThreadId();
+      final attached = fgTid != 0 && fgTid != curTid;
+      if (attached) _a.attachThreadInput(curTid, fgTid, 1);
+      const flags = _swpNomove | _swpNosize | _swpShowwindow;
+      _a.setWindowPos(hwnd, _hwndTopmost, 0, 0, 0, 0, flags);
+      _a.bringWindowToTop(hwnd);
+      _a.setForegroundWindow(hwnd);
+      if (attached) _a.attachThreadInput(curTid, fgTid, 0);
+      return true;
+    } finally {
+      calloc.free(pidPtr);
+    }
+  }
+
+  static int _findVisibleHwndByTitle(String needle) {
+    final hit = calloc<IntPtr>();
+    final titleBuf = calloc<Uint16>(256);
+    int proc(int hwnd, int lParam) {
+      if (hit.value != 0) return 0;
+      if (_a.isWindowVisible(hwnd) == 0) return 1;
+      titleBuf.asTypedList(256).fillRange(0, 256, 0);
+      _a.getWindowText(hwnd, titleBuf.cast(), 256);
+      final title = titleBuf.cast<Utf16>().toDartString();
+      if (title.contains(needle)) {
+        hit.value = hwnd;
+        return 0;
+      }
+      return 1;
+    }
+
+    final cb = NativeCallable<_EnumWindowsProcNative>.isolateLocal(
+      proc,
+      exceptionalReturn: 0,
+    );
+    try {
+      _a.enumWindows(cb.nativeFunction, 0);
+      return hit.value;
+    } finally {
+      cb.close();
+      calloc.free(hit);
+      calloc.free(titleBuf);
+    }
+  }
+
   /// 解析并发送快捷键。成功注入（SendInput 全数返回）即为 true。
   static Future<bool> send(String raw) async {
     if (!isSupported) return false;

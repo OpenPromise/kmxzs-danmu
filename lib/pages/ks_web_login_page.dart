@@ -20,7 +20,7 @@ class KsWebLoginPage {
 
   static const liveHomeUrl = 'https://live.kuaishou.com/';
 
-  /// 与拉流共用同一份 WebView2 用户目录，登录态/滑块通过后才能被房间页继承。
+  /// 仅登录窗口使用。拉流改走一次性干净目录，避免沿用已被打分的设备身份。
   static Future<String> profilePath() async {
     final dir = await getApplicationSupportDirectory();
     return p.join(dir.path, 'webview_ks_native');

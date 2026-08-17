@@ -87,6 +87,12 @@ mixin _ObsController on _HomePageBase {
       return '网络连接失败。若开了代理，请先关闭或将目标域名设为直连';
     }
     if (raw.trim().isEmpty) return '拉流提取失败，请检查链接与网络';
+    if (m.contains('滑块') ||
+        m.contains('关闭快手') ||
+        m.contains('未拿到') ||
+        m.contains('webview')) {
+      return raw.trim();
+    }
     return '拉流失败，请检查直播间链接与网络后重试';
   }
 

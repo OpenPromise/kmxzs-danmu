@@ -404,13 +404,16 @@ class _HomePageState extends _HomePageBase
       if (!extracted.ok || extracted.bestUrl().isEmpty) {
         final tip = _friendlyPullError(extracted.message);
         _appendLog('拉流失败: $tip');
+        if (tip != extracted.message) {
+          _appendLog(extracted.message);
+        }
         _toast(tip);
         await _maybePromptKuaishouLogin(extracted.message);
         return;
       }
       final pullUrl = extracted.bestUrl();
       final candidates = extracted.playCandidates();
-      _appendLog('已获取直播地址');
+      _appendLog('已获取直播地址（房间 ${extracted.roomId ?? '未知'}）');
       _appendLog(
         await _obsWs.ensurePullMediaSource(
           pullUrl,
