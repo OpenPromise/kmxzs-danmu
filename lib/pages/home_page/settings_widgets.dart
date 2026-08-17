@@ -231,71 +231,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
               s._schedulePersist();
             },
           ),
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              border: Border.all(color: const Color(0xFFE2E8F0)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(
-                      s._ksLoggedIn
-                          ? Icons.verified_user
-                          : Icons.login,
-                      size: 18,
-                      color: s._ksLoggedIn
-                          ? Colors.green.shade700
-                          : Colors.blueGrey,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        s._ksLoggedIn ? '快手：已登录' : '快手：未登录',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  s._ksLoggedIn
-                      ? '登录成功。失效时点重新登录即可。'
-                      : '点下方按钮打开快手官网登录，完成后自动记住登录状态。',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade700,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    FilledButton.icon(
-                      onPressed: s._busy
-                          ? null
-                          : () => s._loginKuaishouAccount(),
-                      icon: const Icon(Icons.open_in_browser, size: 18),
-                      label: Text(s._ksLoggedIn ? '重新登录' : '登录快手账号'),
-                    ),
-                    const SizedBox(width: 8),
-                    if (s._ksLoggedIn)
-                      TextButton(
-                        onPressed: s._busy ? null : s._clearKuaishouCookie,
-                        child: const Text('退出登录'),
-                      ),
-                  ],
-                ),
-              ],
-            ),
-          ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('优化直播伴侣内存'),
@@ -314,13 +249,39 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('关播自动停止虚拟摄像机'),
+            title: const Text('一键开始后自动开播'),
+            subtitle: const Text('与关播共用同一快捷键（默认 Alt+P）'),
+            value: s._autoClickStartLive,
+            onChanged: (v) async {
+              setState(() => s._autoClickStartLive = v);
+              await s._persist();
+            },
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('源直播结束后自动关播'),
+            subtitle: const Text('快捷键关播，并自动确认弹窗'),
             value: s._autoStopOnMediaEnd,
             onChanged: (v) async {
               setState(() => s._autoStopOnMediaEnd = v);
               await s._persist();
             },
           ),
+          if (s._autoClickStartLive || s._autoStopOnMediaEnd) ...[
+            const SizedBox(height: 8),
+            TextField(
+              controller: s._hotkeyCtrl,
+              onChanged: (_) => s._schedulePersist(),
+              decoration: const InputDecoration(
+                labelText: '开关播快捷键',
+                hintText: 'Alt+P',
+                helperText: '与伴侣设置里一致；关播后会再点确认弹窗',
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.info_outline),

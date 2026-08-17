@@ -98,31 +98,66 @@ mixin _ObsController on _HomePageBase {
     );
   }
 
+  static const _endedTicksNeeded = 3;
+  static const _playingTicksToCancel = 5;
+
   Future<void> _tickMediaMonitor() async {
-    if (_busy || !mounted) return;
+    if (_busy || !mounted || _endStopRunning) return;
     final pull = await _obsWs.pullState();
-    if (pull == PullState.idle) return;
+    if (pull == PullState.idle) {
+      _playingStreak = 0;
+      return;
+    }
     if (!_pullBaseline) {
       _pullBaseline = true;
       _wasPlaying = pull == PullState.playing;
+      _endedStreak = 0;
+      _playingStreak = 0;
       return;
     }
-    if (pull == PullState.ended && _wasPlaying) {
-      _wasPlaying = false;
-      _appendLog('检测到关播：媒体源已结束');
-      if (_autoStopOnMediaEnd) {
-        await _obsWs.stopVirtualCam();
-        _appendLog('已自动停止虚拟摄像机（关播）');
+    if (pull == PullState.playing) {
+      _playingStreak++;
+      // ffmpeg 断流后会反复重连，单次 playing 不取消关播确认
+      if (_playingStreak < _playingTicksToCancel) return;
+      _endedStreak = 0;
+      if (!_wasPlaying) {
+        _wasPlaying = true;
+        try {
+          _appendLog(await _obsWs.ensureVirtualCamStarted());
+        } catch (e) {
+          _appendLog('重启虚拟摄像机失败: $e');
+        }
+        if (mounted) setState(() => _status = '已就绪');
       }
-      if (mounted) setState(() => _status = '已关播');
-    } else if (pull == PullState.playing && !_wasPlaying) {
-      _wasPlaying = true;
-      try {
-        _appendLog(await _obsWs.ensureVirtualCamStarted());
-      } catch (e) {
-        _appendLog('重启虚拟摄像机失败: $e');
-      }
-      if (mounted) setState(() => _status = '已就绪');
+      return;
     }
+
+    _playingStreak = 0;
+    if (pull != PullState.ended || !_wasPlaying) return;
+
+    _endedStreak++;
+    if (_endedStreak == 1) {
+      _appendLog('检测到源直播可能已结束，确认中…');
+    }
+    if (_endedStreak < _endedTicksNeeded) return;
+
+    _wasPlaying = false;
+    _endStopRunning = true;
+    _appendLog('源直播已结束');
+    if (_autoStopOnMediaEnd) {
+      if (!_skipCompanion && _isKwaiCompanion) {
+        _appendLog('正在发送关播快捷键…');
+        final end = await KwaiLiveStarter.instance.tryEndLive(
+          hotkey: _hotkeyCtrl.text,
+        );
+        _appendLog(end.message);
+        if (!end.ok) {
+          _toast('请在直播伴侣里点「结束直播」');
+        }
+      }
+      await _obsWs.stopVirtualCam();
+      _appendLog('已停止虚拟摄像机');
+    }
+    if (mounted) setState(() => _status = '已关播');
   }
 }

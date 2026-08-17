@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
+import 'package:kmxzs/app_version.dart';
 import 'package:kmxzs/config/app_config.dart';
 import 'package:kmxzs/models/api_models.dart';
 import 'package:kmxzs/services/api_sign.dart';
@@ -23,7 +24,7 @@ class Api {
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 20),
                 headers: {
-                  'User-Agent': 'zbxzs/1.0.12+13',
+                  'User-Agent': 'zbxzs/${AppVersion.display}',
                   'Accept': 'application/json',
                 },
               ),

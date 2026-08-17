@@ -1,6 +1,6 @@
 part of '../home_page.dart';
 
-/// 快手网页登录态：Cookie 自动保存/清除，拉流失败时引导重新登录。
+/// 快手网页登录态：拉流失败时引导登录，成功后自动保存 Cookie。
 mixin _KuaishouController on _HomePageBase {
   bool get _ksLoggedIn =>
       FlvExtractor.hasKuaishouLoginCookie(_ksCookieCtrl.text);
@@ -18,15 +18,6 @@ mixin _KuaishouController on _HomePageBase {
     if (mounted) {
       _toast('快手登录成功');
       setState(() {});
-    }
-  }
-
-  Future<void> _clearKuaishouCookie() async {
-    _ksCookieCtrl.clear();
-    await _persist();
-    if (mounted) {
-      setState(() {});
-      _toast('已退出快手登录');
     }
   }
 

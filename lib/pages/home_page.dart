@@ -9,11 +9,13 @@ import 'package:kmxzs/pages/ks_web_pull_page.dart';
 import 'package:kmxzs/services/api.dart';
 import 'package:kmxzs/services/auth.dart';
 import 'package:kmxzs/services/flv_extractor.dart';
+import 'package:kmxzs/services/kwailive_starter.dart';
 import 'package:kmxzs/services/mem_optimizer.dart';
 import 'package:kmxzs/services/obs_config.dart';
 import 'package:kmxzs/services/obs_ws.dart';
 import 'package:kmxzs/services/path_finder.dart';
 import 'package:kmxzs/services/prefs_keys.dart';
+import 'package:kmxzs/services/win_shell.dart';
 import 'package:kmxzs/app_version.dart';
 import 'package:kmxzs/config/app_config.dart';
 import 'package:kmxzs/widgets/about.dart';
@@ -52,6 +54,7 @@ abstract class _HomePageBase extends State<HomePage> {
   final _roomUrlCtrl = TextEditingController();
   final _ksCookieCtrl = TextEditingController();
   final _ttCookieCtrl = TextEditingController();
+  final _hotkeyCtrl = TextEditingController(text: KwaiHotkey.defaultHotkey);
 
   bool _skipCompanion = false;
 
@@ -60,10 +63,14 @@ abstract class _HomePageBase extends State<HomePage> {
   String _log = '拉流模式：填写直播间链接后点「一键开始」。';
 
   bool _memOpt = false;
+  bool _autoClickStartLive = true;
   bool _autoStopOnMediaEnd = true;
 
   bool _pullBaseline = false;
   bool _wasPlaying = false;
+  int _endedStreak = 0;
+  int _playingStreak = 0;
+  bool _endStopRunning = false;
   bool _memRunning = false;
   DateTime? _lastMemLog;
 
@@ -80,6 +87,11 @@ abstract class _HomePageBase extends State<HomePage> {
   static const int _maxLogLines = 500;
 
   String get _companionPath => _companionPathCtrl.text.trim();
+
+  bool get _isKwaiCompanion {
+    final path = _companionPath.toLowerCase();
+    return path.contains('kwailive') || path.contains('快手');
+  }
 
   void _appendLog(String msg) {
     if (!mounted) return;
@@ -132,12 +144,33 @@ abstract class _HomePageBase extends State<HomePage> {
         ? null
         : _ttCookieCtrl.text.trim();
     await sp.setBool(PrefsKeys.memOpt, _memOpt);
+    await sp.setBool(PrefsKeys.autoClickStartLive, _autoClickStartLive);
     await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
+    await sp.setString(PrefsKeys.liveHotkey, _hotkeyCtrl.text.trim());
   }
 
   Future<void> _launchExe(String path, {List<String> args = const []}) async {
     if (path.isEmpty || !await File(path).exists()) {
       _appendLog('启动失败，文件不存在: $path');
+      return;
+    }
+    final image = path.replaceAll('/', '\\').split('\\').last;
+    if (Platform.isWindows && await _isWindowsImageRunning(image)) {
+      _appendLog('已在运行: $image');
+      return;
+    }
+    if (Platform.isWindows) {
+      // 快手伴侣清单是 requireAdministrator，CreateProcess 会报需要提升。
+      final ok = WinShell.open(
+        path,
+        workingDirectory: File(path).parent.path,
+        args: args,
+      );
+      if (!ok) {
+        _appendLog('启动失败（若弹出了管理员确认，请点是）: $path');
+        return;
+      }
+      _appendLog('已启动: $path${args.isEmpty ? '' : ' ${args.join(' ')}'}');
       return;
     }
     await Process.start(
@@ -147,6 +180,48 @@ abstract class _HomePageBase extends State<HomePage> {
       mode: ProcessStartMode.detached,
     );
     _appendLog('已启动: $path${args.isEmpty ? '' : ' ${args.join(' ')}'}');
+  }
+
+  Future<bool> _isWindowsImageRunning(String image) async {
+    if (image.isEmpty) return false;
+    final r = await Process.run('tasklist', [
+      '/FI',
+      'IMAGENAME eq $image',
+      '/NH',
+    ]);
+    return r.stdout.toString().toLowerCase().contains(image.toLowerCase());
+  }
+
+  /// 伴侣强制管理员运行时，必须用同样权限才能把快捷键打进去。
+  Future<void> _offerRelaunchAsAdmin() async {
+    if (!mounted || !Platform.isWindows) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('需要管理员权限'),
+        content: const Text(
+          '快手直播伴侣本身以管理员运行。Windows 不允许普通权限程序给它发快捷键。\n\n'
+          '快马小助手可以继续不提权使用；若要自动开播/关播，需要以管理员重新打开本软件。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('稍后手动开播'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('以管理员重新打开'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (WinShell.relaunchElevated()) {
+      _appendLog('已请求管理员权限，本窗口即将关闭');
+      exit(0);
+    }
+    _appendLog('未获得管理员权限（可能取消了 UAC）');
+    _toast('未获得管理员权限');
   }
 }
 
@@ -179,6 +254,7 @@ class _HomePageState extends _HomePageBase
     _roomUrlCtrl.dispose();
     _ksCookieCtrl.dispose();
     _ttCookieCtrl.dispose();
+    _hotkeyCtrl.dispose();
     super.dispose();
   }
 
@@ -216,7 +292,15 @@ class _HomePageState extends _HomePageBase
         ? null
         : _ttCookieCtrl.text.trim();
     _memOpt = sp.getBool(PrefsKeys.memOpt) ?? false;
+    _autoClickStartLive = sp.getBool(PrefsKeys.autoClickStartLive) ?? true;
     _autoStopOnMediaEnd = sp.getBool(PrefsKeys.autoStopOnMediaEnd) ?? true;
+    final rawHotkey = sp.getString(PrefsKeys.liveHotkey) ??
+        sp.getString(PrefsKeys.startLiveHotkey) ??
+        sp.getString(PrefsKeys.endLiveHotkey);
+    _hotkeyCtrl.text = KwaiHotkey.normalize(rawHotkey);
+    if (_hotkeyCtrl.text != (rawHotkey ?? '').trim()) {
+      await sp.setString(PrefsKeys.liveHotkey, _hotkeyCtrl.text);
+    }
 
     if (!await _pathExists(_obsPathCtrl.text)) {
       await _detectObsPath(silent: true);
@@ -280,6 +364,10 @@ class _HomePageState extends _HomePageBase
     setState(() => _busy = true);
     _pullBaseline = false;
     _wasPlaying = false;
+    _endedStreak = 0;
+    _playingStreak = 0;
+    _endStopRunning = false;
+    _obsWs.resetPullMonitor();
     try {
       await _persist();
       _appendLog('===== 拉流模式开始 =====');
@@ -337,7 +425,23 @@ class _HomePageState extends _HomePageBase
       }
       setState(() => _status = '已就绪');
       _startMediaMonitor();
-      _toast('已就绪，请在直播伴侣里手动开播');
+      if (_autoClickStartLive && !_skipCompanion && _isKwaiCompanion) {
+        _appendLog('正在发送开播快捷键…');
+        final start = await KwaiLiveStarter.instance.tryStartLive(
+          hotkey: _hotkeyCtrl.text,
+        );
+        _appendLog(start.message);
+        if (start.needsElevation) {
+          _toast('已就绪；自动开播需要与伴侣相同的管理员权限');
+          await _offerRelaunchAsAdmin();
+        } else if (start.ok) {
+          _toast('已就绪，并已尝试开播');
+        } else {
+          _toast('已就绪，请在伴侣里点「开始直播」');
+        }
+      } else {
+        _toast('已就绪，请在直播伴侣里手动开播');
+      }
     } catch (e) {
       _appendLog('异常: $e');
       _toast('执行失败：$e');
@@ -505,15 +609,6 @@ class _HomePageState extends _HomePageBase
                 Row(
                   children: [
                     _StatusChip(label: 'OBS', value: _status),
-                    const SizedBox(width: 8),
-                    InkWell(
-                      onTap: _busy ? null : () => _loginKuaishouAccount(),
-                      borderRadius: BorderRadius.circular(20),
-                      child: _StatusChip(
-                        label: '快手',
-                        value: _ksLoggedIn ? '已登录' : '点此登录',
-                      ),
-                    ),
                     const Spacer(),
                     TextButton(
                       onPressed: _busy

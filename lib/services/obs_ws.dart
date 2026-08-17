@@ -11,6 +11,8 @@ enum PullState { idle, playing, ended }
 class ObsWs {
   ObsWebSocket? _client;
   ObsWsState state = ObsWsState.disconnected;
+  int? _lastMediaCursor;
+  int _cursorStallTicks = 0;
 
   static const mediaSourceName = '直播拉流';
 
@@ -243,6 +245,12 @@ class ObsWs {
     return '已把直播画面加入 OBS';
   }
 
+  /// 新一次拉流开始时清掉进度卡住计数。
+  void resetPullMonitor() {
+    _lastMediaCursor = null;
+    _cursorStallTicks = 0;
+  }
+
   /// 读取「直播拉流」媒体源的开播/关播状态；未连接或无媒体源时返回 idle。
   Future<PullState> pullState() async {
     final c = _client;
@@ -255,10 +263,20 @@ class ObsWs {
         case ObsMediaState.playing:
         case ObsMediaState.opening:
         case ObsMediaState.buffering:
+          final cursor = st.mediaCursor ?? 0;
+          if (_lastMediaCursor != null && cursor == _lastMediaCursor) {
+            _cursorStallTicks++;
+            // 直播进度卡住：ffmpeg 断流后仍可能短暂报 playing
+            if (_cursorStallTicks >= 2) return PullState.ended;
+          } else {
+            _lastMediaCursor = cursor;
+            _cursorStallTicks = 0;
+          }
           return PullState.playing;
         case ObsMediaState.stopped:
         case ObsMediaState.ended:
         case ObsMediaState.error:
+          _cursorStallTicks = 0;
           return PullState.ended;
         case ObsMediaState.paused:
         case ObsMediaState.none:

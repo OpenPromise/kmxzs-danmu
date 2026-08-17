@@ -17,7 +17,9 @@ abstract final class PrefsKeys {
   static const memOpt = 'mem_opt';
   static const roomUrl = 'room_url';
   static const autoClickStartLive = 'auto_click_start_live';
+  static const liveHotkey = 'live_hotkey';
   static const startLiveHotkey = 'start_live_hotkey';
+  static const endLiveHotkey = 'end_live_hotkey';
   static const autoStopOnMediaEnd = 'auto_stop_on_media_end';
   static const apiBaseUrl = 'api_base_url';
   static const kuaishouCookie = 'kuaishou_cookie';
