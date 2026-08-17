@@ -234,17 +234,13 @@ class ObsWs {
 
     await Future.delayed(Duration(milliseconds: isHls ? 1800 : 1200));
     try {
-      final st = await c.mediaInputs.getMediaInputStatus(
+      await c.mediaInputs.getMediaInputStatus(
         inputName: mediaSourceName,
       );
-      final short = mediaUrl.length > 80
-          ? '${mediaUrl.substring(0, 80)}...(${mediaUrl.length}字)'
-          : mediaUrl;
-      return 'mediaState=${st.mediaState}; format=$format; urlLen=${mediaUrl.length}; $short';
     } catch (_) {
-      // 查询媒体状态失败返回 unknown，仅影响日志可读性，可安全忽略
-      return 'mediaStatus unknown; format=$format; urlLen=${mediaUrl.length}';
+      // 查询失败不影响已经写入的媒体源，只影响日志
     }
+    return '已把直播画面加入 OBS';
   }
 
   /// 读取「直播拉流」媒体源的开播/关播状态；未连接或无媒体源时返回 idle。

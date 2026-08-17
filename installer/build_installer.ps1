@@ -50,8 +50,41 @@ if (-not $iscc) {
 }
 
 New-Item -ItemType Directory -Force -Path (Join-Path $root "dist") | Out-Null
+
+$redistDir = Join-Path $PSScriptRoot 'redist'
+New-Item -ItemType Directory -Force -Path $redistDir | Out-Null
+# 在线引导程序（约 1.7MB）。国内直连微软 Edge CDN 已测通，用户安装时再拉完整运行时。
+$wv2 = Join-Path $redistDir 'MicrosoftEdgeWebview2Setup.exe'
+$oldStandalone = Join-Path $redistDir 'MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+if (Test-Path $oldStandalone) { Remove-Item $oldStandalone -Force }
+$minBytes = 500000
+if (-not (Test-Path $wv2) -or ((Get-Item $wv2).Length -lt $minBytes) -or ((Get-Item $wv2).Length -gt 10MB)) {
+  Write-Host "== download WebView2 Evergreen Bootstrapper =="
+  $wv2Url = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+  & curl.exe --noproxy '*' -L --retry 3 --retry-delay 2 --connect-timeout 30 -o $wv2 $wv2Url
+  if (-not (Test-Path $wv2) -or ((Get-Item $wv2).Length -lt $minBytes)) {
+    throw "下载 WebView2 引导程序失败: $wv2Url"
+  }
+}
+Write-Host ("WebView2 bootstrapper: {0:N1} KB" -f ((Get-Item $wv2).Length / 1KB))
+
 Write-Host "== Inno Setup compile =="
-& $iscc "/DMyAppVersion=$version" (Join-Path $root "installer\zbxzs.iss")
-if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+$iss = Join-Path $root "installer\zbxzs.iss"
+$outExe = Join-Path $root "dist\zbxzs-setup-$version.exe"
+$ok = $false
+foreach ($i in 1..4) {
+  if (Test-Path $outExe) {
+    try { Remove-Item $outExe -Force -ErrorAction Stop } catch {
+      Write-Warning "输出文件被占用，等待后重试 ($i/4): $outExe"
+      Start-Sleep -Seconds (3 * $i)
+      continue
+    }
+  }
+  & $iscc "/DMyAppVersion=$version" $iss
+  if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+  Write-Warning "ISCC 失败 (exit $LASTEXITCODE)，可能是杀毒锁文件，${i}/4 次后重试"
+  Start-Sleep -Seconds (4 * $i)
+}
+if (-not $ok) { throw "ISCC failed" }
 
 Get-ChildItem (Join-Path $root "dist\zbxzs-setup-*.exe") | Sort-Object LastWriteTime -Descending | Select-Object -First 3 FullName, Length

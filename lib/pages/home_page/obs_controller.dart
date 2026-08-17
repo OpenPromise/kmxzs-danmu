@@ -5,8 +5,7 @@ mixin _ObsController on _HomePageBase {
   Future<void> _ensureObsReady() async {
     final fix = await _obsConfig.handleNew();
     _appendLog(
-      '已自动配置 OBS WebSocket：${fix.changes.join('；')}'
-      '${fix.error == null ? '' : '；写入异常: ${fix.error}'}',
+      fix.error == null ? '已自动配置 OBS' : 'OBS 自动配置未完成，请确认 OBS 已安装',
     );
 
     final running = await _obsConfig.isObsProcessRunning();
@@ -53,7 +52,7 @@ mixin _ObsController on _HomePageBase {
     } catch (e) {
       setState(() => _status = '未连接');
       _appendLog('OBS 连接失败: $e');
-      if (!silent) _toast('OBS 拒绝连接，请确认 OBS 已启动并启用了 WebSocket');
+      if (!silent) _toast('OBS 拒绝连接，请确认 OBS 已启动');
       rethrow;
     }
   }
@@ -61,27 +60,34 @@ mixin _ObsController on _HomePageBase {
   String _friendlyPullError(String raw) {
     final m = raw.toLowerCase();
     if (m.contains('result=2') ||
+        m.contains('400002') ||
         m.contains('操作频繁') ||
         m.contains('操作太快') ||
         m.contains('风控') ||
         m.contains('captcha')) {
-      return '快手需要登录态或触发了风控。请点「登录快手账号」，并关闭 Clash TUN 后重试';
+      return '操作过于频繁，请关闭代理后等几分钟再试';
     }
-    if (m.contains('tiktok') &&
-        (m.contains('cookie') || m.contains('未解析') || m.contains('地区'))) {
-      return 'TikTok 解析失败。请确认开播中，关闭代理或粘贴 www.tiktok.com Cookie 后重试';
+    if (m.contains('tiktok')) {
+      return 'TikTok 解析失败。请确认正在直播并关闭代理后重试';
     }
-    if (m.contains('未开播') || m.contains('not live') || m.contains('offline') || m.contains('直播已结束')) {
+    if (m.contains('未开播') ||
+        m.contains('not live') ||
+        m.contains('offline') ||
+        m.contains('直播已结束')) {
       return '直播间似乎未开播，请确认链接后重试';
     }
-    if (m.contains('cookie')) {
-      return '需要登录态。请点击「登录快手账号」完成网页登录';
+    if (m.contains('web_st') ||
+        m.contains('cookie') ||
+        m.contains('请先登录') ||
+        m.contains('登录快手') ||
+        m.contains('未登录')) {
+      return '请先登录快手账号后再试';
     }
     if (m.contains('timeout') || m.contains('timed out') || m.contains('连接')) {
-      return '网络连接失败。若开了 Clash TUN，请先关闭或将目标域名设为直连';
+      return '网络连接失败。若开了代理，请先关闭或将目标域名设为直连';
     }
     if (raw.trim().isEmpty) return '拉流提取失败，请检查链接与网络';
-    return '拉流失败：$raw';
+    return '拉流失败，请检查直播间链接与网络后重试';
   }
 
   void _startMediaMonitor() {

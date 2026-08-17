@@ -18,12 +18,12 @@ class _AccountBanner extends StatelessWidget {
     final card = a?.card ?? '—';
     final remain = a?.remainingLabel ?? '未知';
     final expires = a?.expiresLabel ?? '未知';
-    final device = a?.deviceId ?? '—';
     final used = a?.deviceCount;
     final max = a?.maxDevices;
+    // 只展示已用/上限台数，不暴露具体设备标识（如 win-xxx）给用户界面
     final deviceLine = (used != null && max != null)
-        ? '设备 $used/$max · $device'
-        : '设备 · $device';
+        ? '已用 $used/$max 台设备'
+        : '本机已授权';
     final low = (a?.remainingHours ?? 999) < 24;
     final expired = (a?.remainingHours ?? 1) <= 0;
 
@@ -180,7 +180,7 @@ class _PathRow extends StatelessWidget {
   }
 }
 
-/// 设置面板：OBS/伴侣路径、WebSocket 地址、快手登录、TikTok Cookie、内存与自动停。
+/// 设置面板：OBS/伴侣路径、快手登录、内存与自动停；WebSocket 等收到折叠「高级」。
 ///
 /// 通过持有的 `_HomePageState` 直接读写状态，行为与原先内联在 build() 中完全一致；
 /// 展开/收起由本组件自管，不再占主 State 的字段。
@@ -231,29 +231,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
               s._schedulePersist();
             },
           ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('跳过直播伴侣路径设置'),
-            subtitle: const Text('没有有效路径时不弹窗；已设置路径时仍会自动启动'),
-            value: s._skipCompanion,
-            onChanged: (v) {
-              setState(() => s._skipCompanion = v);
-              s._persist();
-            },
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: s._wsUrlCtrl,
-            onChanged: (_) => s._schedulePersist(),
-            decoration: InputDecoration(
-              labelText: 'OBS WebSocket 地址',
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
-            ),
-          ),
           const SizedBox(height: 8),
           Container(
             width: double.infinity,
@@ -280,9 +257,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        s._ksLoggedIn
-                            ? '快手网页账号：已登录（拉流可用）'
-                            : '快手网页账号：未登录（拉流易被风控）',
+                        s._ksLoggedIn ? '快手：已登录' : '快手：未登录',
                         style: const TextStyle(
                           fontWeight: FontWeight.w600,
                         ),
@@ -293,8 +268,8 @@ class _SettingsPanelState extends State<_SettingsPanel> {
                 const SizedBox(height: 6),
                 Text(
                   s._ksLoggedIn
-                      ? 'Cookie 已自动保存。失效时可重新登录。'
-                      : '点击下方按钮打开快手官网登录，完成后自动获取 Cookie。',
+                      ? '登录成功。失效时点重新登录即可。'
+                      : '点下方按钮打开快手官网登录，完成后自动记住登录状态。',
                   style: TextStyle(
                     fontSize: 12,
                     color: Colors.grey.shade700,
@@ -319,21 +294,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
                   ],
                 ),
               ],
-            ),
-          ),
-          const SizedBox(height: 8),
-          TextField(
-            controller: s._ttCookieCtrl,
-            onChanged: (_) => s._schedulePersist(),
-            maxLines: 2,
-            decoration: InputDecoration(
-              labelText: 'TikTok Cookie（可选）',
-              hintText: '浏览器登录 www.tiktok.com 后粘贴，部分地区/18+需要',
-              filled: true,
-              fillColor: Colors.white,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(10),
-              ),
             ),
           ),
           SwitchListTile(
@@ -369,6 +329,42 @@ class _SettingsPanelState extends State<_SettingsPanel> {
               '${AppConfig.productName}  v${AppVersion.name}\n${AppAbout.publisherLine}',
             ),
             onTap: () => AppAbout.show(context),
+          ),
+          Theme(
+            data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+            child: ExpansionTile(
+              initiallyExpanded: false,
+              tilePadding: EdgeInsets.zero,
+              title: const Text(
+                '高级',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('跳过直播伴侣路径设置'),
+                  subtitle: const Text('没有有效路径时不弹窗；已设置路径时仍会自动启动'),
+                  value: s._skipCompanion,
+                  onChanged: (v) {
+                    setState(() => s._skipCompanion = v);
+                    s._persist();
+                  },
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: s._wsUrlCtrl,
+                  onChanged: (_) => s._schedulePersist(),
+                  decoration: InputDecoration(
+                    labelText: 'OBS WebSocket 地址',
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),

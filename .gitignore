@@ -56,6 +56,7 @@ app.*.map.json
 /server/_remote*.py
 /dist/
 /installer/secrets.ps1
+/installer/redist/*.exe
 /kmxzs.config.json
 /build/debug-info/
 

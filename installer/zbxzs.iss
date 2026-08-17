@@ -54,6 +54,9 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 Source: "{#MySourceDir}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "*.pdb,*.map,HOW_TO_RUN.txt"
+; 微软 WebView2 在线引导程序（约 1.7MB）：安装时若本机没有运行时，由引导程序从微软 CDN 拉取完整运行时
+Source: "redist\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{app}\redist"; Flags: ignoreversion
+Source: "redist\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; DestName: "MicrosoftEdgeWebview2Setup.exe"; Flags: deleteafterinstall
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -61,7 +64,36 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
+Filename: "{tmp}\MicrosoftEdgeWebview2Setup.exe"; Parameters: "/silent /install /norestart"; StatusMsg: "正在安装 WebView2 运行时..."; Flags: waituntilterminated; Check: NeedsWebView2
 Filename: "{app}\{#MyAppExeName}"; Description: "立即运行 {#MyAppName}"; Flags: nowait postinstall
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+function WebView2Installed: Boolean;
+var
+  Pv: String;
+  Key: String;
+begin
+  Result := False;
+  Key := 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  if RegQueryStringValue(HKLM, Key, 'pv', Pv) and (Pv <> '') and (Pv <> '0.0.0.0') then
+  begin
+    Result := True;
+    exit;
+  end;
+  Key := 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
+  if RegQueryStringValue(HKLM, Key, 'pv', Pv) and (Pv <> '') and (Pv <> '0.0.0.0') then
+  begin
+    Result := True;
+    exit;
+  end;
+  if RegQueryStringValue(HKCU, Key, 'pv', Pv) and (Pv <> '') and (Pv <> '0.0.0.0') then
+    Result := True;
+end;
+
+function NeedsWebView2: Boolean;
+begin
+  Result := not WebView2Installed;
+end;

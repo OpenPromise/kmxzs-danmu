@@ -6,6 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import '../services/flv_extractor.dart';
+import '../services/webview2_runtime.dart';
+
 /// 用独立原生 WebView2 窗口登录快手（非 Flutter 纹理合成，速度接近系统浏览器）。
 class KsWebLoginPage {
   KsWebLoginPage._();
@@ -17,34 +20,23 @@ class KsWebLoginPage {
 
   static const liveHomeUrl = 'https://live.kuaishou.com/';
 
+  /// 与拉流共用同一份 WebView2 用户目录，登录态/滑块通过后才能被房间页继承。
+  static Future<String> profilePath() async {
+    final dir = await getApplicationSupportDirectory();
+    return p.join(dir.path, 'webview_ks_native');
+  }
+
   /// 打开原生浏览器窗口登录；成功返回 Cookie，取消返回 null。
   static Future<String?> open(BuildContext context) async {
     final available = await WebviewWindow.isWebviewAvailable();
     if (!available) {
       if (context.mounted) {
-        await showDialog<void>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('缺少 WebView2'),
-            content: const Text(
-              '本机未安装 Microsoft Edge WebView2 运行时，无法打开登录窗口。\n'
-              '请安装后重试：\n'
-              'https://developer.microsoft.com/microsoft-edge/webview2/',
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('知道了'),
-              ),
-            ],
-          ),
-        );
+        await WebView2Runtime.showMissingDialog(context);
       }
       return null;
     }
 
-    final dir = await getApplicationSupportDirectory();
-    final profile = p.join(dir.path, 'webview_ks_native');
+    final profile = await profilePath();
     // 每次重新登录都清掉上次会话，避免「未操作就判定已登录」
     await _resetProfile(profile);
 
@@ -101,22 +93,13 @@ class KsWebLoginPage {
       } catch (_) {
         // 窗口可能已被用户手动关闭，close 报错可安全忽略
       }
-      if (!completer.isCompleted) completer.complete(cookie);
+      // 保存前统一再过一次清洗，禁止把 \0/控制字符写进 Cookie 头
+      final safe = cookie == null ? null : FlvExtractor.sanitizeCookieHeader(cookie);
+      if (!completer.isCompleted) completer.complete(safe);
     }
 
-    Future<({String header, List<String> names, int count})> collect({
-      bool goLive = false,
-    }) async {
-      if (goLive) {
-        try {
-          webview.launch(liveHomeUrl, triggerOnUrlRequestEvent: false);
-        } catch (_) {
-          // 跳转失败不影响后续读取已存 Cookie，可安全忽略
-        }
-        await _waitNavigatingDone(webview);
-        await Future.delayed(const Duration(milliseconds: 1800));
-      }
-
+    Future<({String header, List<String> names, int count})> readCookies()
+        async {
       List nativeCookies = const [];
       try {
         nativeCookies = await webview.getAllCookies();
@@ -133,6 +116,30 @@ class KsWebLoginPage {
       return (header: header, names: names, count: merged.length);
     }
 
+    Future<({String header, List<String> names, int count})> collect({
+      bool goLive = false,
+    }) async {
+      if (goLive) {
+        try {
+          webview.launch(liveHomeUrl, triggerOnUrlRequestEvent: false);
+        } catch (_) {
+          // 跳转失败不影响后续读取已存 Cookie，可安全忽略
+        }
+        await _waitNavigatingDone(webview);
+        // 真实拉流需要 live.kuaishou.com 下发的 HttpOnly `kuaishou.live.web_st`，
+        // document.cookie 读不到，必须轮询 getAllCookies。最长等约 15 秒，
+        // 一旦出现强登录态立即返回；超时则返回当前已收集的 Cookie。
+        final deadline = DateTime.now().add(const Duration(seconds: 15));
+        while (DateTime.now().isBefore(deadline)) {
+          final r = await readCookies();
+          if (_isStrongLogin(r.header, r.names)) return r;
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+        return readCookies();
+      }
+      return readCookies();
+    }
+
     // 不再启动时就轮询：避免残留/访客 Cookie 被误判后立刻关窗。
     // 仅在主框真正跳到直播站后，用严格规则自动保存。
     webview.onClose.whenComplete(() {
@@ -142,15 +149,22 @@ class KsWebLoginPage {
     webview.setOnUrlRequestCallback((url) {
       if (!_isLiveHomeNavigation(url)) return true;
       reachedLiveHome = true;
-      Future.delayed(const Duration(milliseconds: 2000), () async {
-        if (settled) return;
-        try {
-          final r = await collect(goLive: false);
-          if (_isStrongLogin(r.header, r.names)) {
-            finish(r.header);
+      Future.delayed(const Duration(milliseconds: 500), () async {
+        // 主框已落到直播站后，轮询等 HttpOnly `kuaishou.live.web_st` 下发，
+        // 出现即自动保存；长时间没出现时由「我已登录」按钮兜底。
+        final deadline = DateTime.now().add(const Duration(seconds: 15));
+        while (DateTime.now().isBefore(deadline)) {
+          if (settled) return;
+          try {
+            final r = await readCookies();
+            if (_isStrongLogin(r.header, r.names)) {
+              finish(r.header);
+              return;
+            }
+          } catch (_) {
+            // 自动保存失败由「我已登录」按钮兜底，这里静默忽略
           }
-        } catch (_) {
-          // 自动保存失败由「我已登录」按钮兜底，这里静默忽略
+          await Future.delayed(const Duration(milliseconds: 500));
         }
       });
       return true;
@@ -176,9 +190,8 @@ class KsWebLoginPage {
         return AlertDialog(
           title: const Text('请在弹出窗口中登录'),
           content: const Text(
-            '已打开独立浏览器窗口（已清除旧登录态）。\n'
-            '请完成扫码/短信登录，等页面自动跳到直播站后，再点「我已登录」。\n'
-            '跳到直播站且检测到真实登录 Cookie 时，也会自动保存。',
+            '已打开登录窗口。\n'
+            '请完成扫码或短信登录，等页面跳到快手直播后再点「我已登录」。',
           ),
           actions: [
             TextButton(
@@ -189,9 +202,9 @@ class KsWebLoginPage {
               onPressed: () async {
                 try {
                   final r = await collect(goLive: true);
-                  // 你截图里这种 userId + passToken + web_st 直接视为成功
-                  if (_isStrongLogin(r.header, r.names) ||
-                      _looksLikeKsSession(r.names)) {
+                  // 必须出现 live 域下发的 HttpOnly `kuaishou.live.web_st` 才算成功，
+                  // userId/passToken 只是通行证 Cookie，不能用于拉流。
+                  if (_isStrongLogin(r.header, r.names)) {
                     finish(r.header);
                     return;
                   }
@@ -200,32 +213,17 @@ class KsWebLoginPage {
                   await showDialog<void>(
                     context: ctx,
                     builder: (dCtx) => AlertDialog(
-                      title: const Text('尚未检测到登录态'),
+                      title: const Text('还没有登录成功'),
                       content: Text(
-                        r.count == 0
-                            ? '未读到任何 Cookie。\n\n'
-                                '请先在弹出窗口完成登录，等地址栏变为 '
-                                'live.kuaishou.com 后再点「我已登录」。'
-                            : '已读到 ${r.count} 个 Cookie，但还不是登录态'
-                                '${reachedLiveHome ? '' : '（尚未跳到直播站）'}：\n'
-                                '${r.names.take(16).join(', ')}'
-                                '${r.names.length > 16 ? '…' : ''}\n\n'
-                                '请完成登录并等待跳转后再试。\n'
-                                '若右上角已显示头像，可点「仍要保存」。',
+                        reachedLiveHome
+                            ? '还没有检测到登录。请确认弹出窗口右上角已显示头像，然后再点「我已登录」。'
+                            : '请先在弹出窗口完成登录，等页面跳到快手直播后再点「我已登录」。',
                       ),
                       actions: [
                         TextButton(
                           onPressed: () => Navigator.pop(dCtx),
                           child: const Text('再试一次'),
                         ),
-                        if (r.count > 0)
-                          FilledButton(
-                            onPressed: () {
-                              Navigator.pop(dCtx);
-                              finish(r.header);
-                            },
-                            child: const Text('仍要保存'),
-                          ),
                       ],
                     ),
                   );
@@ -328,19 +326,31 @@ class KsWebLoginPage {
   ) {
     final map = <String, Map<String, String>>{};
 
+    int domainScore(String d) {
+      final x = d.toLowerCase();
+      if (x.contains('live.kuaishou')) return 3;
+      if (x.contains('kuaishou')) return 2;
+      return 1;
+    }
+
     void put(String rawName, String rawValue, String domain) {
       final name = _sanitizeCookiePart(rawName);
       final value = _sanitizeCookiePart(rawValue);
       if (name.isEmpty) return;
-      // 同名时优先保留更长的非空值（document.cookie 常比带 \0 的原生值干净）
+      final d = _sanitizeCookiePart(domain);
+      // 同名时优先 live.kuaishou.com 域、再非空更长的值
+      // （document.cookie 常比带 \0 的原生值干净）
       final prev = map[name];
-      if (prev == null ||
-          (value.length > (prev['value']?.length ?? 0) && value.isNotEmpty)) {
-        map[name] = {
-          'name': name,
-          'value': value,
-          'domain': _sanitizeCookiePart(domain),
-        };
+      if (prev == null) {
+        map[name] = {'name': name, 'value': value, 'domain': d};
+        return;
+      }
+      if (value.isEmpty) return;
+      final prevDomain = prev['domain'] ?? '';
+      final dom = domainScore(d).compareTo(domainScore(prevDomain));
+      final prevLen = prev['value']?.length ?? 0;
+      if (dom > 0 || (dom == 0 && value.length > prevLen)) {
+        map[name] = {'name': name, 'value': value, 'domain': d};
       }
     }
 
@@ -378,34 +388,23 @@ class KsWebLoginPage {
         .trim();
   }
 
-  /// 截图场景：同时有 userId、passToken，或任意 web_st / web_ph。
+  /// 真正的快手直播登录态：live/server 域下发的 HttpOnly `kuaishou.live.web_st`
+  /// 或 `kuaishou.server.web_st`。userId / passToken 只是 passport 通行证 Cookie，
+  /// 不代表 live 拉流已授权，不能当成功。
   static bool _looksLikeKsSession(List names) {
     final norms = names.map((e) => _normName('$e')).toList();
-    final blob = norms.join('|');
-    final hasUser = norms.any((n) => n == 'userid' || n.endsWith('userid'));
-    final hasPass =
-        norms.any((n) => n == 'passtoken' || n.contains('passtoken'));
-    final hasSt = blob.contains('web_st') || blob.contains('api_st');
-    final hasPh = blob.contains('web_ph') || blob.contains('api_ph');
-    if (hasSt) return true;
-    if (hasUser && hasPass) return true;
-    if (hasUser && hasPh) return true;
-    return false;
+    return norms.any(
+      (n) => n.contains('kuaishou.live.web_st') || n.contains('kuaishou.server.web_st'),
+    );
   }
 
-  /// 登录态：live/server st，或 userId+passToken（名称用包含匹配，避免不可见字符）。
+  /// 登录态判定：Cookie 头或名称里必须出现 live/server 域下发的 web_st。
   static bool _isStrongLogin(String header, List names) {
     if (_looksLikeKsSession(names)) return true;
-
-    final c = _normName(header);
-    if (c.contains('kuaishou.live.web_st') ||
-        c.contains('kuaishou.server.web_st') ||
-        c.contains('web_st=')) {
-      return true;
-    }
-    final hasUser = c.contains('userid=');
-    final hasPass = c.contains('passtoken=');
-    return hasUser && hasPass;
+    final c = _normName(header).toLowerCase();
+    // _toHeader 已过滤空值，这里能进头就说明值非空
+    return c.contains('kuaishou.live.web_st=') ||
+        c.contains('kuaishou.server.web_st=');
   }
 
   static String _toHeader(List<Map<String, String>> cookies) {

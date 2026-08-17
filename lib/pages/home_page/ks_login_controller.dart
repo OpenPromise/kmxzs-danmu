@@ -14,7 +14,7 @@ mixin _KuaishouController on _HomePageBase {
     final cleaned = FlvExtractor.sanitizeCookieHeader(cookie);
     _ksCookieCtrl.text = cleaned;
     await _persist();
-    _appendLog('快手账号登录成功，Cookie 已自动保存（${cleaned.length} 字符）');
+    _appendLog('快手账号登录成功');
     if (mounted) {
       _toast('快手登录成功');
       setState(() {});
@@ -26,23 +26,35 @@ mixin _KuaishouController on _HomePageBase {
     await _persist();
     if (mounted) {
       setState(() {});
-      _toast('已退出快手网页登录态');
+      _toast('已退出快手登录');
     }
   }
 
   Future<void> _maybePromptKuaishouLogin(String failMsg) async {
+    final rateLimit = failMsg.contains('已触发快手风控') ||
+        failMsg.contains('livedetail.result=2') ||
+        failMsg.contains('操作太快') ||
+        failMsg.contains('操作频繁');
+    // 已登录直播站（有 web_st）时，风控不是登录态失效：不弹重新登录，
+    // 明确提示关 TUN/系统代理、等 5–10 分钟再试即可。
+    if (rateLimit && _ksLoggedIn) {
+      _appendLog('快手已登录，但操作过于频繁。请关闭代理，等几分钟再试，无需重新登录。');
+      _toast('操作过于频繁，请关闭代理后等几分钟再试');
+      return;
+    }
     final need = failMsg.contains('Cookie') ||
-        failMsg.contains('风控') ||
-        failMsg.contains('result=2') ||
-        failMsg.contains('操作太快');
+        failMsg.contains('请先登录') ||
+        failMsg.contains('登录快手') ||
+        failMsg.contains('未登录') ||
+        rateLimit;
     if (!need || !mounted) return;
     final go = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(_ksLoggedIn ? '快手需要重新登录' : '需要登录快手账号'),
+        title: const Text('需要登录快手账号'),
         content: const Text(
-          '快手网页拉流需要登录态。点击「去登录」将打开官方页面，'
-          '你完成登录后软件会自动保存 Cookie，无需手动复制。',
+          '拉快手直播需要先登录快手账号。'
+          '点「去登录」将打开官方页面，登录完成后软件会自动记住。',
         ),
         actions: [
           TextButton(

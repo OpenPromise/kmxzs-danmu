@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:kmxzs/pages/login_page.dart';
 import 'package:kmxzs/pages/ks_web_login_page.dart';
+import 'package:kmxzs/pages/ks_web_pull_page.dart';
 import 'package:kmxzs/services/api.dart';
 import 'package:kmxzs/services/auth.dart';
 import 'package:kmxzs/services/flv_extractor.dart';
@@ -298,25 +299,30 @@ class _HomePageState extends _HomePageBase
       try {
         await _testObsWs(silent: true);
       } catch (e) {
-        _toast(
-          'OBS WebSocket 未连通。请确认：\n'
-          '1) OBS 已启动\n'
-          '2) 工具 → WebSocket 服务器设置已启用\n'
-          '3) 地址与设置一致（当前 ${_wsUrlCtrl.text.trim()}）',
-        );
+        _toast('无法连接 OBS。请确认 OBS 已启动后再试');
         return;
       }
-      final extracted = await _flvExtractor.extract(room);
+      late final FlvExtractResult extracted;
+      if (FlvExtractor.looksLikeKuaishou(room)) {
+        if (!mounted) return;
+        extracted = await KsWebPullPage.open(
+          context,
+          room,
+          log: _appendLog,
+        );
+      } else {
+        extracted = await _flvExtractor.extract(room);
+      }
       if (!extracted.ok || extracted.bestUrl().isEmpty) {
         final tip = _friendlyPullError(extracted.message);
-        _appendLog('拉流失败: ${extracted.message}');
+        _appendLog('拉流失败: $tip');
         _toast(tip);
         await _maybePromptKuaishouLogin(extracted.message);
         return;
       }
       final pullUrl = extracted.bestUrl();
       final candidates = extracted.playCandidates();
-      _appendLog('拉流: $pullUrl');
+      _appendLog('已获取直播地址');
       _appendLog(
         await _obsWs.ensurePullMediaSource(
           pullUrl,

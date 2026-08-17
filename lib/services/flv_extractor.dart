@@ -28,6 +28,10 @@ class FlvExtractor {
   static const _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36';
 
+  /// 快手专用 UA：提到较新 Chrome，降低风控误判（其余平台仍用 _ua，避免改行为）。
+  static const _ksUa =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
   /// OBS FFmpeg 媒体源复用同一 UA（YouTube 等 CDN 常校验）
   static const browserUa = _ua;
 
@@ -81,6 +85,58 @@ class FlvExtractor {
     } catch (e) {
       return FlvExtractResult.fail('提取失败: $e');
     }
+  }
+
+  /// 房间号（如 WOT-360-CN）或快手域名链接，走内置浏览器取流。
+  static bool looksLikeKuaishou(String text) {
+    final t = text.trim();
+    if (t.isEmpty) return false;
+    final u = t.toLowerCase();
+    if (u.contains('kuaishou') ||
+        u.contains('gifshow') ||
+        u.contains('chenzhongtech')) {
+      return true;
+    }
+    // 非纯数字的短房间号默认按快手（纯数字更像 B 站/抖音）
+    return RegExp(r'^[A-Za-z0-9_\-]+$').hasMatch(t) && !RegExp(r'^\d+$').hasMatch(t);
+  }
+
+  /// 把浏览器页里扫到的地址整理成给 OBS 的结果。
+  FlvExtractResult packPlayUrls({
+    required LivePlatform platform,
+    required String roomId,
+    required List<String> urls,
+    String? note,
+  }) {
+    final flv = <String>[];
+    final hls = <String>[];
+    for (final raw in urls) {
+      final u = _cleanUrl(raw);
+      final low = u.toLowerCase();
+      if (!low.startsWith('http')) continue;
+      if (low.contains('m3u8')) {
+        hls.add(u);
+      } else if (_looksPlayableFlv(u) || low.contains('.flv') || low.contains('pull-flv')) {
+        flv.add(u);
+      }
+    }
+    final flvU = _rankFlv(_uniq(flv.where(_looksPlayableFlv)));
+    final hlsU = _uniq(hls.where((u) => u.toLowerCase().contains('m3u8')));
+    if (flvU.isEmpty && hlsU.isEmpty) {
+      return FlvExtractResult.fail(
+        '未拿到可播放地址',
+        platform: platform,
+        roomId: roomId,
+      );
+    }
+    return FlvExtractResult.ok(
+      platform: platform,
+      roomId: roomId,
+      flvUrls: flvU,
+      hlsUrls: hlsU,
+      allUrls: [...flvU, ...hlsU],
+      note: note,
+    );
   }
 
   LivePlatform detectPlatform(String text) {
@@ -647,11 +703,14 @@ class FlvExtractor {
     final notes = <String>[];
     final flv = <String>[];
     final hls = <String>[];
-    final did = 'web_${DateTime.now().millisecondsSinceEpoch.toRadixString(16)}';
-    final cookie = _mergeKsCookie(kuaishouCookie, did);
+
     final hasLoginCookie = _ksHasLoginCookie(kuaishouCookie);
+    // 不要每次拉流都伪造新 did：整段 Cookie 有 did= 就沿用原 did；
+    // 有 web_st 时补假 did 会被快手当成异常设备。仅当完全没有 did= 且
+    // 也没有 web_st 时才补一个占位 did。
+    final cookie = _mergeKsCookie(kuaishouCookie);
     notes.add('房间=$rid');
-    notes.add(hasLoginCookie ? 'Cookie: 已配置' : 'Cookie: 未配置');
+    notes.add(hasLoginCookie ? 'Cookie: 已配置（含 web_st）' : 'Cookie: 缺少 web_st 字段');
 
     var rateLimited = false;
     var livingFalse = false;
@@ -662,24 +721,17 @@ class FlvExtractor {
       await Future.delayed(const Duration(milliseconds: 400));
     }
 
-    // —— 有登录 Cookie：优先 GraphQL（社区工具普遍依赖此路径）
-    if (hasLoginCookie) {
-      await _ksGraphqlLiveDetail(rid, cookie, flv, hls, notes);
-      if (flv.isEmpty && hls.isEmpty) await pause();
-    }
-
-    // —— PC 直播页 INITIAL_STATE（可修 undefined；正则兜底）
+    // —— 主路径：房间页 INITIAL_STATE（输入若已是完整 URL 则用原 URL）
     if (flv.isEmpty && hls.isEmpty) {
       try {
-        final pageUrl = input.contains('http')
-            ? input.trim()
+        final trimmed = input.trim();
+        final pageUrl = trimmed.toLowerCase().startsWith('http')
+            ? trimmed
             : 'https://live.kuaishou.com/u/$rid';
         final res = await _dio.get(
-          pageUrl.startsWith('http')
-              ? pageUrl
-              : 'https://live.kuaishou.com/u/$rid',
+          pageUrl,
           options: Options(headers: {
-            'User-Agent': _ua,
+            'User-Agent': _ksUa,
             'Referer': 'https://live.kuaishou.com/',
             'Cookie': cookie,
             'Accept-Language': 'zh-CN,zh;q=0.9',
@@ -691,7 +743,7 @@ class FlvExtractor {
         if (parsed.livingFalse) livingFalse = true;
         if (parsed.rateLimited) {
           rateLimited = true;
-          errHint ??= '快手网页触发风控（操作频繁），请稍后或换 Cookie';
+          errHint ??= '操作过于频繁，请关闭代理后等几分钟再试';
         }
         // 页面正则兜底：即使 JSON 失败也能捞 flv/m3u8
         if (flv.isEmpty && hls.isEmpty) {
@@ -704,37 +756,14 @@ class FlvExtractor {
       if (flv.isEmpty && hls.isEmpty) await pause();
     }
 
-    // —— profile 页（go-olive v2）
-    if (flv.isEmpty && hls.isEmpty && hasLoginCookie) {
-      try {
-        final res = await _dio.get(
-          'https://live.kuaishou.com/profile/$rid',
-          options: Options(headers: {
-            'User-Agent': _ua,
-            'Referer': 'https://live.kuaishou.com/',
-            'Cookie': cookie,
-          }),
-        );
-        final body = res.data?.toString() ?? '';
-        if (body.contains('直播中') || body.contains('isLiving')) {
-          livingTrue = true;
-        }
-        final n = _ksScrapeUrlsFromHtml(body, flv, hls);
-        if (n > 0) notes.add('来源: profile 页（$n）');
-      } catch (e) {
-        notes.add('profile 失败: $e');
-      }
-      if (flv.isEmpty && hls.isEmpty) await pause();
-    }
-
-    // —— livedetail API
-    if (flv.isEmpty && hls.isEmpty) {
+    // —— 兜底：livedetail API（最多一次；已风控则不再打任何接口）
+    if (flv.isEmpty && hls.isEmpty && !rateLimited) {
       try {
         final res = await _dio.get(
           'https://live.kuaishou.com/live_api/liveroom/livedetail',
           queryParameters: {'principalId': rid},
           options: Options(headers: {
-            'User-Agent': _ua,
+            'User-Agent': _ksUa,
             'Referer': 'https://live.kuaishou.com/u/$rid',
             'Cookie': cookie,
             'Accept': 'application/json',
@@ -747,95 +776,53 @@ class FlvExtractor {
           notes.add('livedetail.result=$result');
           if (result == 2) {
             rateLimited = true;
-            errHint = '快手接口返回风控(result=2)，请稍后再试或粘贴浏览器 Cookie';
+            errHint = '操作过于频繁，请关闭代理后等几分钟再试';
+          } else {
+            final author = _asMap(data['author']);
+            if (author != null) {
+              if (author['living'] == false) livingFalse = true;
+              if (author['living'] == true) livingTrue = true;
+            }
+            final n = _collectKsPlayUrls(data, flv, hls);
+            if (n > 0) notes.add('来源: livedetail API（$n）');
+            if (result == 400002) {
+              errHint = '请先登录快手账号';
+            }
           }
-          final author = _asMap(data['author']);
-          if (author != null) {
-            if (author['living'] == false) livingFalse = true;
-            if (author['living'] == true) livingTrue = true;
-          }
-          final n = _collectKsPlayUrls(data, flv, hls);
-          if (n > 0) notes.add('来源: livedetail API（$n）');
         }
       } catch (e) {
         notes.add('livedetail 失败: $e');
       }
+      if (flv.isEmpty && hls.isEmpty) await pause();
     }
 
-    // —— H5 byUser：已风控则跳过，避免雪上加霜
-    if (flv.isEmpty && hls.isEmpty && !rateLimited) {
-      await pause();
-      try {
-        final res = await _dio.post(
-          'https://livev.m.chenzhongtech.com/rest/k/live/byUser',
-          queryParameters: {
-            'kpn': 'GAME_ZONE',
-            'captchaToken': '',
-          },
-          data: {
-            'source': 5,
-            'eid': rid,
-            'shareMethod': 'card',
-            'clientType': 'WEB_OUTSIDE_SHARE_H5',
-          },
-          options: Options(headers: {
-            'User-Agent':
-                'ios/7.830 (ios 17.0; ; iPhone 15 (A2846/A3089/A3090/A3092))',
-            'content-type': 'application/json',
-            'Referer': 'https://v.m.chenzhongtech.com/',
-            'Cookie': cookie,
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-          }),
-        );
-        final root = _asMap(res.data);
-        if (root != null) {
-          final result = root['result'];
-          notes.add('byUser.result=$result');
-          final err = root['error_msg']?.toString() ?? '';
-          if (err.isNotEmpty) {
-            notes.add('byUser: $err');
-            if (err.contains('频繁') ||
-                err.contains('操作太快') ||
-                err.toLowerCase().contains('frequent') ||
-                result == 2) {
-              rateLimited = true;
-              errHint ??= '快手 H5 接口触发频率限制';
-            }
-          }
-          final liveStream = _asMap(root['liveStream']);
-          if (liveStream != null) {
-            if (liveStream['living'] == false) livingFalse = true;
-            if (liveStream['living'] == true) livingTrue = true;
-            final n = _collectKsPlayUrls(liveStream, flv, hls);
-            if (n > 0) notes.add('来源: byUser API（$n）');
-          }
-        }
-      } catch (e) {
-        notes.add('byUser 失败: $e');
-      }
-    } else if (rateLimited && flv.isEmpty && hls.isEmpty) {
-      notes.add('已风控，跳过 byUser 以免加重限制');
+    // —— GraphQL 兜底（仅保留作兜底：有登录 Cookie、未风控、前面都失败时）
+    if (flv.isEmpty && hls.isEmpty && !rateLimited && hasLoginCookie) {
+      await _ksGraphqlLiveDetail(rid, cookie, flv, hls, notes);
     }
+
+    if (rateLimited) notes.add('已风控，跳过其余接口以免加重限制');
 
     final flvU = _rankFlv(_uniq(flv.where(_looksPlayableFlv)));
     final hlsU = _uniq(hls.where((u) => u.toLowerCase().contains('m3u8')));
     if (flvU.isEmpty && hlsU.isEmpty) {
-      final reasons = <String>[];
-      if (rateLimited) reasons.add('触发快手风控/频率限制');
-      if (livingFalse && !livingTrue) reasons.add('接口显示当前未开播');
-      if (livingTrue) reasons.add('页面显示在播，但未拿到地址（多半要 Cookie）');
-      if (!hasLoginCookie) {
-        reasons.add('未配置浏览器 Cookie（快手几乎必填）');
+      final String failReason;
+      if (rateLimited) {
+        failReason =
+            '已触发快手风控/频率限制。请关闭 TUN / 系统代理，等 5–10 分钟再试（无需重新登录）。';
+      } else if (livingFalse && !livingTrue) {
+        failReason = '接口显示当前未开播。请确认主播正在直播。';
+      } else if (!hasLoginCookie) {
+        failReason =
+            '请先登录快手账号。';
+      } else if (errHint != null) {
+        failReason = errHint;
+      } else {
+        failReason = '未拿到可播放地址。';
       }
-      if (errHint != null) reasons.add(errHint);
-      if (reasons.isEmpty) reasons.add('未拿到可播放地址');
       return FlvExtractResult.fail(
-        '快手房间 $rid 拉流失败：${reasons.join('；')}\n'
-        '正确做法：\n'
-        '1) 在本软件点击「登录快手账号」，完成网页登录后自动保存\n'
-        '2) 关闭 Clash TUN / 系统代理后再试（假 IP 会加重风控）\n'
-        '3) 确认主播正在直播；风控后等 5–10 分钟再点\n'
-        '${notes.join('\n')}',
+        '快手房间 $rid 拉流失败：$failReason\n'
+        '提示：请确认主播正在直播；未登录时先点「登录快手账号」。',
         platform: LivePlatform.kuaishou,
         roomId: rid,
       );
@@ -852,19 +839,14 @@ class FlvExtractor {
 
   bool _ksHasLoginCookie(String? raw) => hasKuaishouLoginCookie(raw);
 
-  /// 判断是否像登录态 Cookie（供 UI / 自动登录引导复用）。
+  /// 判断是否有直播站登录态 Cookie（供 UI / 自动登录引导复用）。
+  /// 必须含 live/server 域下发的 `kuaishou.live.web_st` 或 `kuaishou.server.web_st`；
+  /// userId / passToken 只是通行证 Cookie，不能当作已登录。
   static bool hasKuaishouLoginCookie(String? raw) {
     final c = sanitizeCookieHeader(raw).toLowerCase();
     if (c.trim().isEmpty) return false;
-    if (c.contains('kuaishou.live.web_st=') ||
-        c.contains('kuaishou.server.web_st=')) {
-      return true;
-    }
-    final hasUser = c.contains('userid=') || c.contains('buserid=');
-    final hasToken = c.contains('passtoken=') ||
-        c.contains('api_st=') ||
-        c.contains('web_st=');
-    return hasUser && hasToken;
+    return c.contains('kuaishou.live.web_st=') ||
+        c.contains('kuaishou.server.web_st=');
   }
 
   /// 去掉 WebView/\u0000 等非法字符，避免 Dio 拒绝 Cookie 头。
@@ -896,7 +878,7 @@ class FlvExtractor {
     List<String> notes,
   ) async {
     const query =
-        r'query LiveDetail($principalId: String) { liveDetail(principalId: $principalId) { liveStream { caption playUrls { quality url } hlsPlayUrl } } }';
+        r'query LiveDetail($principalId: String) { liveDetail(principalId: $principalId) { liveStream { caption playUrls { h264 { adaptationSet { representation { url backupUrl name } } } } hlsPlayUrl } } }';
     for (final endpoint in [
       'https://live.kuaishou.com/graphql',
       'https://live.kuaishou.com/live_graphql',
@@ -910,7 +892,7 @@ class FlvExtractor {
             'query': query,
           },
           options: Options(headers: {
-            'User-Agent': _ua,
+            'User-Agent': _ksUa,
             'Referer': 'https://live.kuaishou.com/u/$rid',
             'Origin': 'https://live.kuaishou.com',
             'Cookie': cookie,
@@ -941,74 +923,150 @@ class FlvExtractor {
     var livingFalse = false;
     var rateLimited = false;
 
-    final marker = body.indexOf('__INITIAL_STATE__');
-    if (marker < 0) {
-      notes.add('PC 页无 INITIAL_STATE');
-      return (
-        livingTrue: livingTrue,
-        livingFalse: livingFalse,
-        rateLimited: rateLimited,
-      );
-    }
-    final start = body.indexOf('{', marker);
-    if (start < 0) {
-      notes.add('INITIAL_STATE 无对象起始');
-      return (
-        livingTrue: livingTrue,
-        livingFalse: livingFalse,
-        rateLimited: rateLimited,
-      );
-    }
-    final raw = _ttSliceJsonObject(body, start);
-    if (raw == null) {
-      notes.add('INITIAL_STATE 括号截取失败');
-      return (
-        livingTrue: livingTrue,
-        livingFalse: livingFalse,
-        rateLimited: rateLimited,
-      );
+    void onLiving({required bool living, required bool notLiving}) {
+      if (living) livingTrue = true;
+      if (notLiving) livingFalse = true;
     }
 
-    // 页面是 JS 对象，含 undefined/NaN，需先洗成合法 JSON
-    final cleaned = _ksJsObjectToJson(raw);
-    try {
-      final root = jsonDecode(cleaned);
-      final liveroom = _asMap(_asMap(root)?['liveroom']);
-      final playList = liveroom?['playList'];
-      if (playList is List && playList.isNotEmpty) {
-        final first = _asMap(playList.first);
-        if (first != null) {
-          if (first['isLiving'] == true) livingTrue = true;
-          if (first['isLiving'] == false) livingFalse = true;
-          final err = _asMap(first['errorType']);
-          if (err != null) {
-            final title = '${err['title'] ?? ''}';
-            final content = '${err['content'] ?? ''}';
-            notes.add('页面错误: $title $content'.trim());
-            if (title.contains('频繁') ||
-                content.contains('频繁') ||
-                content.contains('操作太快') ||
-                err['type'] == 2) {
-              rateLimited = true;
+    void applyErrorType(dynamic err) {
+      final e = _asMap(err);
+      if (e == null) return;
+      final title = '${e['title'] ?? ''}';
+      final content = '${e['content'] ?? ''}';
+      notes.add('页面错误: $title $content'.trim());
+      if (title.contains('滑块') ||
+          content.contains('滑块') ||
+          content.contains('完成验证')) {
+        return;
+      }
+      if (title.contains('频繁') ||
+          content.contains('频繁') ||
+          content.contains('操作太快') ||
+          e['type'] == 2) {
+        rateLimited = true;
+      }
+    }
+
+    // 主路径：与 DouyinLiveRecorder 相同的两段正则。
+    // 1) 抠出整段 INITIAL_STATE JS 对象；
+    // 2) 再抠出其中的 {"liveStream"...},"gameInfo 块，补 '}' 变回合法 JSON。
+    final stateMatch = RegExp(
+      r'window\.__INITIAL_STATE__=(.*?);\(function\(\)\{var s;',
+      dotAll: true,
+    ).firstMatch(body);
+    final liveChunk = stateMatch == null
+        ? null
+        : ksLiveStreamChunk(stateMatch.group(1)!);
+    if (liveChunk != null) {
+      final cleaned = ksJsObjectToJson(liveChunk);
+      try {
+        final root = jsonDecode(cleaned);
+        if (root is Map) {
+          final liveStream = _asMap(root['liveStream']);
+          if (liveStream != null) {
+            if (liveStream['living'] == true) {
+              onLiving(living: true, notLiving: false);
             }
+            if (liveStream['living'] == false) {
+              onLiving(living: false, notLiving: true);
+            }
+            applyErrorType(liveStream['errorType']);
+            // 主路径显式走 h264（OBS 不兼容 hevc），优先 representation[].url
+            final h264 = _asMap(_asMap(liveStream['playUrls'])?['h264']);
+            final adapt = _asMap(h264?['adaptationSet']);
+            final reps = adapt?['representation'];
+            if (reps is List && reps.isNotEmpty) {
+              var n = 0;
+              for (final r in reps) {
+                final m = _asMap(r);
+                if (m == null) continue;
+                final u = _cleanUrl(m['url']?.toString() ?? '');
+                if (u.isNotEmpty && _looksPlayableFlv(u)) {
+                  flv.add(u);
+                  n++;
+                }
+                final backup = _cleanUrl(m['backupUrl']?.toString() ?? '');
+                if (backup.isNotEmpty && _looksPlayableFlv(backup)) {
+                  flv.add(backup);
+                  n++;
+                }
+              }
+              if (n > 0) notes.add('来源: INITIAL_STATE h264（$n）');
+            }
+            // 补充：递归扫描整个 liveStream，兜住其它候选
+            final extra = _collectKsPlayUrls(liveStream, flv, hls);
+            if (extra > 0) notes.add('来源: INITIAL_STATE 扫描（$extra）');
           }
-          final n = _collectKsPlayUrls(first, flv, hls);
-          if (n > 0) notes.add('来源: INITIAL_STATE（$n）');
         }
-      } else {
-        final n = _collectKsPlayUrls(root, flv, hls);
-        if (n > 0) notes.add('来源: INITIAL_STATE 扫描（$n）');
+      } catch (e) {
+        notes.add('liveStream 块解析失败: $e');
       }
-      if (RegExp(r'"isLiving"\s*:\s*true').hasMatch(cleaned)) {
-        livingTrue = true;
+    }
+
+    // 两段正则没出地址时，回退整段 INITIAL_STATE 截取
+    if (flv.isEmpty && hls.isEmpty) {
+      final marker = body.indexOf('__INITIAL_STATE__');
+      if (marker < 0) {
+        notes.add('PC 页无 INITIAL_STATE');
+        return (
+          livingTrue: livingTrue,
+          livingFalse: livingFalse,
+          rateLimited: rateLimited,
+        );
       }
-    } catch (e) {
-      notes.add('INITIAL_STATE 解析失败: $e');
-      // JSON 仍失败时，从原文正则捞地址
-      final n = _ksScrapeUrlsFromHtml(raw, flv, hls);
-      if (n > 0) notes.add('来源: INITIAL_STATE 正则（$n）');
-      if (RegExp(r'"isLiving"\s*:\s*true').hasMatch(raw)) livingTrue = true;
-      if (raw.contains('频繁') || raw.contains('操作太快')) rateLimited = true;
+      final start = body.indexOf('{', marker);
+      if (start < 0) {
+        notes.add('INITIAL_STATE 无对象起始');
+        return (
+          livingTrue: livingTrue,
+          livingFalse: livingFalse,
+          rateLimited: rateLimited,
+        );
+      }
+      final raw = _ttSliceJsonObject(body, start);
+      if (raw == null) {
+        notes.add('INITIAL_STATE 括号截取失败');
+        return (
+          livingTrue: livingTrue,
+          livingFalse: livingFalse,
+          rateLimited: rateLimited,
+        );
+      }
+
+      // 页面是 JS 对象，含 undefined/NaN，需先洗成合法 JSON
+      final cleaned = ksJsObjectToJson(raw);
+      try {
+        final root = jsonDecode(cleaned);
+        final liveroom = _asMap(_asMap(root)?['liveroom']);
+        final playList = liveroom?['playList'];
+        if (playList is List && playList.isNotEmpty) {
+          final first = _asMap(playList.first);
+          if (first != null) {
+            if (first['isLiving'] == true) {
+              onLiving(living: true, notLiving: false);
+            }
+            if (first['isLiving'] == false) {
+              onLiving(living: false, notLiving: true);
+            }
+            applyErrorType(first['errorType']);
+            final n = _collectKsPlayUrls(first, flv, hls);
+            if (n > 0) notes.add('来源: INITIAL_STATE（$n）');
+          }
+        } else {
+          final n = _collectKsPlayUrls(root, flv, hls);
+          if (n > 0) notes.add('来源: INITIAL_STATE 扫描（$n）');
+        }
+        if (RegExp(r'"isLiving"\s*:\s*true').hasMatch(cleaned)) {
+          livingTrue = true;
+        }
+      } catch (e) {
+        notes.add('INITIAL_STATE 解析失败: $e');
+        // JSON 仍失败时，从原文正则捞地址
+        final n = _ksScrapeUrlsFromHtml(raw, flv, hls);
+        if (n > 0) notes.add('来源: INITIAL_STATE 正则（$n）');
+        if (RegExp(r'"isLiving"\s*:\s*true').hasMatch(raw)) livingTrue = true;
+        if (raw.contains('频繁') || raw.contains('操作太快')) rateLimited = true;
+      }
     }
     return (
       livingTrue: livingTrue,
@@ -1017,12 +1075,52 @@ class FlvExtractor {
     );
   }
 
-  String _ksJsObjectToJson(String raw) {
+  /// 从 INITIAL_STATE JS 对象里抠出 `{"liveStream"...}` 之前的 JSON 块并补全。
+  /// 结构：`{"liveStream":{...},"gameInfo":{...}}`，捕获组不含外层结尾 `}`，需补一个。
+  /// 公开给单测直接调用（纯字符串处理，不打网络）。
+  static String? ksLiveStreamChunk(String state) {
+    final m = RegExp(
+      r'(\{"liveStream".*?),"gameInfo',
+      dotAll: true,
+    ).firstMatch(state);
+    if (m == null) return null;
+    return '${m.group(1)!}}';
+  }
+
+  /// 把 JS 对象字面量洗成合法 JSON：undefined/NaN → null，删尾逗号。
+  /// 公开给单测直接调用。
+  static String ksJsObjectToJson(String raw) {
     var s = raw;
     s = s.replaceAll(RegExp(r'\bundefined\b'), 'null');
     s = s.replaceAll(RegExp(r'\bNaN\b'), 'null');
-    s = s.replaceAll(RegExp(r',\s*([}\]])'), r'$1');
+    // 尾逗号必须用 replaceAllMapped 写回捕获组，禁止 r'$1'（那会变成字面量 $1，损坏 JSON）。
+    s = s.replaceAllMapped(
+      RegExp(r',\s*([}\]])'),
+      (m) => m.group(1)!,
+    );
     return s;
+  }
+
+  /// 测试专用：解析一段含 INITIAL_STATE 的 HTML，返回抽出的地址与状态（不打网络）。
+  static ({
+    List<String> flvUrls,
+    List<String> hlsUrls,
+    bool livingTrue,
+    bool livingFalse,
+    bool rateLimited,
+  }) ksParseInitialStateHtml(String body) {
+    final f = FlvExtractor();
+    final flv = <String>[];
+    final hls = <String>[];
+    final notes = <String>[];
+    final r = f._ksParseInitialState(body, flv, hls, notes);
+    return (
+      flvUrls: List.unmodifiable(flv),
+      hlsUrls: List.unmodifiable(hls),
+      livingTrue: r.livingTrue,
+      livingFalse: r.livingFalse,
+      rateLimited: r.rateLimited,
+    );
   }
 
   int _ksScrapeUrlsFromHtml(
@@ -1059,12 +1157,19 @@ class FlvExtractor {
     return (flv.length + hls.length) - before;
   }
 
-  String _mergeKsCookie(String? userCookie, String did) {
-    final parts = <String>[];
+  String _mergeKsCookie(String? userCookie) {
     final raw = sanitizeCookieHeader(userCookie);
-    if (raw.isNotEmpty) parts.add(raw);
-    if (!raw.contains('did=')) parts.add('did=$did');
-    return parts.join('; ');
+    if (raw.isEmpty) return '';
+    final lower = raw.toLowerCase();
+    // 不要每次生成新 did：有 did= 就沿用原 did；有 web_st 时补假 did 会被当异常设备。
+    // 仅当整段 Cookie 完全没有 did= 且也没有 web_st 时才补一个占位 did。
+    if (!lower.contains('did=') &&
+        !lower.contains('kuaishou.live.web_st=') &&
+        !lower.contains('kuaishou.server.web_st=')) {
+      final did = 'web_${DateTime.now().millisecondsSinceEpoch.toRadixString(16)}';
+      return '$raw; did=$did';
+    }
+    return raw;
   }
 
   /// 从快手响应里收集 flv/hls。返回新增条数。
@@ -1106,8 +1211,15 @@ class FlvExtractor {
         // 新版：playUrls.h264.adaptationSet.representation[].url
         final playUrls = n['playUrls'];
         if (playUrls is Map) {
-          for (final codec in playUrls.values) {
-            final c = _asMap(codec);
+          for (final entry in playUrls.entries) {
+            final codecName = entry.key.toString().toLowerCase();
+            // 忽略 hevc/h265/av1（OBS 不兼容），主路径只走 h264
+            if (codecName.contains('hevc') ||
+                codecName.contains('h265') ||
+                codecName.contains('av1')) {
+              continue;
+            }
+            final c = _asMap(entry.value);
             final adapt = _asMap(c?['adaptationSet']);
             final reps = adapt?['representation'];
             if (reps is List) {
@@ -1776,8 +1888,7 @@ class FlvExtractor {
       }
       return FlvExtractResult.fail(
         'TikTok 未能解析房间号。请粘贴开播中的链接，例如：\n'
-        'https://www.tiktok.com/@用户名/live\n'
-        '${notes.join('\n')}',
+        'https://www.tiktok.com/@用户名/live',
         platform: LivePlatform.tiktok,
         roomId: uniqueId,
       );
@@ -1838,8 +1949,7 @@ class FlvExtractor {
 
     if (flvU.isEmpty && hlsU.isEmpty) {
       return FlvExtractResult.fail(
-        'TikTok 未解析到可播地址（需开播中；部分地区需 Cookie 或关闭代理）\n'
-        '${notes.join('\n')}',
+        'TikTok 未解析到可播地址。请确认主播正在直播并关闭代理后重试。',
         platform: LivePlatform.tiktok,
         roomId: roomId,
       );

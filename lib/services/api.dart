@@ -23,7 +23,7 @@ class Api {
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 20),
                 headers: {
-                  'User-Agent': 'zbxzs/1.0.6+7',
+                  'User-Agent': 'zbxzs/1.0.12+13',
                   'Accept': 'application/json',
                 },
               ),
