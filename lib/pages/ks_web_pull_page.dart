@@ -3,17 +3,20 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:desktop_webview_window/desktop_webview_window.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:kmxzs/services/flv_extractor.dart';
+import 'package:kmxzs/services/prefs_keys.dart';
 import 'package:kmxzs/services/webview2_runtime.dart';
 import 'package:kmxzs/services/win_hotkey.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-/// 用一次性干净 WebView2 会话打开快手房间页取流（类似无痕）。
+/// 用独立于登录的 WebView2 会话打开快手房间页取流。
 ///
-/// 持久登录目录会被快手按设备身份打分；分不够时只扣当前房间 playUrls。
-/// 每次拉流换新用户目录，不沿用这份身份。
+/// 登录目录会被按设备身份打分；拉流用另一份目录，平时复用，
+/// 确认「请求过快」后才换新。不改 UA、不额外打 livedetail。
 ///
 /// 实测 `https://live.kuaishou.com/u/{rid}` 的数据结构：
 /// `window.__INITIAL_STATE__.liveroom.playList` 是数组，
@@ -22,6 +25,16 @@ import 'package:path_provider/path_provider.dart';
 /// 当前项可能因验证暂时为空；通过后只在本页取流并关窗，不刷新。
 class KsWebPullPage {
   KsWebPullPage._();
+
+  static const _firstProbeDelay = Duration(seconds: 2);
+  static const _probeInterval = Duration(milliseconds: 2500);
+  static const _urlSettle = Duration(milliseconds: 1500);
+  static const minPullInterval = Duration(seconds: 45);
+  static const rateLimitCooldown = Duration(minutes: 3);
+
+  static DateTime? _lastPullAt;
+  static DateTime? _coolUntil;
+  static bool _cooldownLoaded = false;
 
   static const _hookJs = r'''
 (function () {
@@ -221,9 +234,29 @@ class KsWebPullPage {
     final pageUrl = input.trim().toLowerCase().startsWith('http')
         ? input.trim()
         : 'https://live.kuaishou.com/u/$rid';
-    note('正在用干净会话打开房间 $rid（类似无痕，不沿用已风控身份）');
 
-    final profile = await _freshIncognitoProfile();
+    await _loadCooldown();
+    final wait = cooldownWait(
+      now: DateTime.now(),
+      lastPullAt: _lastPullAt,
+      coolUntil: _coolUntil,
+    );
+    if (wait != null) {
+      final sec = wait.inSeconds.clamp(1, 3600);
+      final msg = (_coolUntil != null && DateTime.now().isBefore(_coolUntil!))
+          ? '刚才房间被风控，请 $sec 秒后再试，以免把拉流会话再次打分。'
+          : '拉流间隔过短，请 $sec 秒后再试。';
+      note(msg);
+      return FlvExtractResult.fail(
+        msg,
+        platform: LivePlatform.kuaishou,
+        roomId: rid,
+      );
+    }
+    await _markPullAttempt();
+    note('正在打开房间 $rid（拉流会话与登录分开，不改浏览器标识）');
+
+    final profile = await _pullProfilePath();
     late final Webview webview;
     try {
       webview = await WebviewWindow.create(
@@ -237,7 +270,6 @@ class KsWebPullPage {
         ),
       );
     } catch (e) {
-      _wipeProfileLater(profile);
       return FlvExtractResult.fail(
         '无法打开快手浏览器窗口: $e',
         platform: LivePlatform.kuaishou,
@@ -247,11 +279,13 @@ class KsWebPullPage {
 
     final completer = Completer<FlvExtractResult>();
     var settled = false;
+    var rotateProfile = false;
     BuildContext? tipCtx;
     var sliderHinted = false;
     var verifyPassedHinted = false;
     var roomOpenedHinted = false;
     DateTime? verifiedAt;
+    DateTime? urlsSeenAt;
     final startedAt = DateTime.now();
 
     Future<void> raisePullWindow() async {
@@ -272,7 +306,7 @@ class KsWebPullPage {
       tipCtx = null;
     }
 
-    void finish(FlvExtractResult result) {
+    void finish(FlvExtractResult result, {bool rateLimited = false}) {
       if (settled) return;
       settled = true;
       dismissTip();
@@ -281,7 +315,11 @@ class KsWebPullPage {
       } catch (e) {
         debugPrint('[ks-pull] close: $e');
       }
-      _wipeProfileLater(profile);
+      if (rateLimited || rotateProfile) {
+        rotateProfile = true;
+        unawaited(_markRateLimited());
+        _wipeProfileLater(profile);
+      }
       if (!completer.isCompleted) completer.complete(result);
     }
 
@@ -295,11 +333,6 @@ class KsWebPullPage {
       );
     });
 
-    try {
-      await webview.setApplicationNameForUserAgent(' kmxzs/1.0');
-    } catch (e) {
-      debugPrint('[ks-pull] ua: $e');
-    }
     try {
       webview.addScriptToExecuteOnDocumentCreated(_hookJs);
     } catch (e) {
@@ -316,7 +349,7 @@ class KsWebPullPage {
           return AlertDialog(
             title: const Text('正在取流'),
             content: Text(
-              '正在用干净会话打开房间 $rid。出现验证时请在弹出窗口完成，'
+              '正在打开房间 $rid。出现验证时请在弹出窗口完成，'
               '通过后软件会自动取流并关闭窗口。',
             ),
             actions: [
@@ -337,14 +370,17 @@ class KsWebPullPage {
     }
 
     unawaited(() async {
+      await Future.delayed(_firstProbeDelay);
       final probe = _probeJs(rid);
       while (!settled) {
-        await Future.delayed(const Duration(milliseconds: 800));
         if (settled) return;
         try {
           final raw = await webview.evaluateJavaScript(probe);
           final parsed = _parseProbe(raw);
-          if (parsed == null) continue;
+          if (parsed == null) {
+            await Future.delayed(_probeInterval);
+            continue;
+          }
           if (hrefIsTargetRoom(parsed.href, rid) && !roomOpenedHinted) {
             roomOpenedHinted = true;
             note('已进入房间页 ${parsed.href}');
@@ -357,20 +393,26 @@ class KsWebPullPage {
             extraUrls: [...parsed.hooked, ...parsed.perf],
           );
           if (urls.isNotEmpty) {
-            final packed = FlvExtractor().packPlayUrls(
-              platform: LivePlatform.kuaishou,
-              roomId: rid,
-              urls: urls,
-              note: '来源: WebView playList 当前房间',
-            );
-            if (packed.ok) {
-              note(
-                '浏览器取流成功，房间 $rid，当前场 ${packed.allUrls.length} 条',
+            urlsSeenAt ??= DateTime.now();
+            if (DateTime.now().difference(urlsSeenAt!) >= _urlSettle) {
+              final packed = FlvExtractor().packPlayUrls(
+                platform: LivePlatform.kuaishou,
+                roomId: rid,
+                urls: urls,
+                note: '来源: WebView playList 当前房间',
               );
-              finish(packed);
-              return;
+              if (packed.ok) {
+                note(
+                  '浏览器取流成功，房间 $rid，当前场 ${packed.allUrls.length} 条',
+                );
+                finish(packed);
+                return;
+              }
             }
+            await Future.delayed(_probeInterval);
+            continue;
           }
+          urlsSeenAt = null;
           final needSlide = parsed.captcha ||
               parsed.activeError.contains('滑块') ||
               parsed.activeError.contains('完成验证') ||
@@ -383,6 +425,7 @@ class KsWebPullPage {
               note('出现验证，已把窗口置顶。完成后会自动取流并关窗');
               await raisePullWindow();
             }
+            await Future.delayed(_probeInterval);
             continue;
           }
           if (sliderHinted && !verifyPassedHinted) {
@@ -402,6 +445,7 @@ class KsWebPullPage {
                 platform: LivePlatform.kuaishou,
                 roomId: rid,
               ),
+              rateLimited: rateLimited,
             );
             return;
           }
@@ -415,6 +459,7 @@ class KsWebPullPage {
                 platform: LivePlatform.kuaishou,
                 roomId: rid,
               ),
+              rateLimited: true,
             );
             return;
           }
@@ -433,35 +478,27 @@ class KsWebPullPage {
         } catch (e) {
           debugPrint('[ks-pull] probe: $e');
         }
+        if (!settled) await Future.delayed(_probeInterval);
       }
     }());
 
     return completer.future;
   }
 
-  /// 每次拉流新建空用户目录，效果接近浏览器无痕：新 did、无历史 Cookie。
-  static Future<String> _freshIncognitoProfile() async {
-    final root = await getTemporaryDirectory();
-    final base = Directory(p.join(root.path, 'kmxzs_ks_incognito'));
-    await base.create(recursive: true);
-    final dir = Directory(
-      p.join(base.path, '${DateTime.now().microsecondsSinceEpoch}'),
-    );
-    await dir.create(recursive: true);
-    unawaited(_sweepOldIncognito(base.path, keep: dir.path));
-    return dir.path;
+  /// 拉流专用目录，与登录的 webview_ks_native 分开。
+  static Future<String> _pullProfilePath() async {
+    unawaited(_sweepTempIncognito());
+    final dir = await getApplicationSupportDirectory();
+    final path = p.join(dir.path, 'webview_ks_pull');
+    await Directory(path).create(recursive: true);
+    return path;
   }
 
-  static Future<void> _sweepOldIncognito(String base, {required String keep}) async {
+  static Future<void> _sweepTempIncognito() async {
     try {
-      final parent = Directory(base);
-      if (!await parent.exists()) return;
-      await for (final e in parent.list()) {
-        if (p.equals(e.path, keep)) continue;
-        try {
-          await e.delete(recursive: true);
-        } catch (_) {}
-      }
+      final root = await getTemporaryDirectory();
+      final old = Directory(p.join(root.path, 'kmxzs_ks_incognito'));
+      if (await old.exists()) await old.delete(recursive: true);
     } catch (_) {}
   }
 
@@ -477,6 +514,72 @@ class KsWebPullPage {
         } catch (_) {}
       }
     }());
+  }
+
+  @visibleForTesting
+  static void resetPullPacingForTest() {
+    _lastPullAt = null;
+    _coolUntil = null;
+    _cooldownLoaded = true;
+  }
+
+  /// 距下次允许拉流的剩余时间；null 表示可以立刻开始。
+  @visibleForTesting
+  static Duration? cooldownWait({
+    required DateTime now,
+    DateTime? lastPullAt,
+    DateTime? coolUntil,
+    Duration minInterval = minPullInterval,
+  }) {
+    if (coolUntil != null && now.isBefore(coolUntil)) {
+      return coolUntil.difference(now);
+    }
+    if (lastPullAt != null) {
+      final elapsed = now.difference(lastPullAt);
+      if (elapsed < minInterval) return minInterval - elapsed;
+    }
+    return null;
+  }
+
+  static Future<void> _loadCooldown() async {
+    if (_cooldownLoaded) return;
+    _cooldownLoaded = true;
+    try {
+      final sp = await SharedPreferences.getInstance();
+      final last = sp.getInt(PrefsKeys.ksPullLastMs);
+      final cool = sp.getInt(PrefsKeys.ksPullCoolUntilMs);
+      if (last != null && last > 0) {
+        _lastPullAt = DateTime.fromMillisecondsSinceEpoch(last);
+      }
+      if (cool != null && cool > 0) {
+        _coolUntil = DateTime.fromMillisecondsSinceEpoch(cool);
+      }
+    } catch (e) {
+      debugPrint('[ks-pull] load cooldown: $e');
+    }
+  }
+
+  static Future<void> _markPullAttempt() async {
+    _lastPullAt = DateTime.now();
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setInt(PrefsKeys.ksPullLastMs, _lastPullAt!.millisecondsSinceEpoch);
+    } catch (e) {
+      debugPrint('[ks-pull] save last pull: $e');
+    }
+  }
+
+  static Future<void> _markRateLimited() async {
+    _coolUntil = DateTime.now().add(rateLimitCooldown);
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setInt(
+        PrefsKeys.ksPullCoolUntilMs,
+        _coolUntil!.millisecondsSinceEpoch,
+      );
+    } catch (e) {
+      debugPrint('[ks-pull] save cool until: $e');
+    }
   }
 
   static String _roomId(String input) {

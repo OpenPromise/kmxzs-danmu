@@ -24,4 +24,6 @@ abstract final class PrefsKeys {
   static const apiBaseUrl = 'api_base_url';
   static const kuaishouCookie = 'kuaishou_cookie';
   static const tiktokCookie = 'tiktok_cookie';
+  static const ksPullLastMs = 'ks_pull_last_ms';
+  static const ksPullCoolUntilMs = 'ks_pull_cool_until_ms';
 }

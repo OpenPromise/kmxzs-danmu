@@ -217,4 +217,40 @@ window.__INITIAL_STATE__={"liveStream":{"errorType":{"title":"操作频繁","con
       expect(urls, [mine]);
     });
   });
+
+  group('KsWebPullPage.cooldownWait', () {
+    final now = DateTime(2026, 8, 17, 19, 0, 0);
+
+    test('没有上次拉流时可以立刻开始', () {
+      expect(
+        KsWebPullPage.cooldownWait(now: now, lastPullAt: null, coolUntil: null),
+        isNull,
+      );
+    });
+
+    test('间隔不足时返回剩余时间', () {
+      final last = now.subtract(const Duration(seconds: 10));
+      expect(
+        KsWebPullPage.cooldownWait(now: now, lastPullAt: last, coolUntil: null),
+        const Duration(seconds: 35),
+      );
+    });
+
+    test('间隔已够时不再拦截', () {
+      final last = now.subtract(const Duration(seconds: 45));
+      expect(
+        KsWebPullPage.cooldownWait(now: now, lastPullAt: last, coolUntil: null),
+        isNull,
+      );
+    });
+
+    test('风控冷却优先于普通间隔', () {
+      final last = now.subtract(const Duration(seconds: 50));
+      final cool = now.add(const Duration(minutes: 2));
+      expect(
+        KsWebPullPage.cooldownWait(now: now, lastPullAt: last, coolUntil: cool),
+        const Duration(minutes: 2),
+      );
+    });
+  });
 }

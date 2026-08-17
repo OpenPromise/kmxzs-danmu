@@ -170,11 +170,6 @@ class KsWebLoginPage {
       return true;
     });
 
-    try {
-      await webview.setApplicationNameForUserAgent(' kmxzs/1.0');
-    } catch (_) {
-      // 非关键装饰性设置，失败不影响登录流程
-    }
     webview.launch(passportUrl);
 
     if (!context.mounted) {

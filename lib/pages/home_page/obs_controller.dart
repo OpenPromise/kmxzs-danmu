@@ -90,7 +90,10 @@ mixin _ObsController on _HomePageBase {
     if (m.contains('滑块') ||
         m.contains('关闭快手') ||
         m.contains('未拿到') ||
-        m.contains('webview')) {
+        m.contains('webview') ||
+        m.contains('间隔过短') ||
+        m.contains('被风控') ||
+        m.contains('秒后再试')) {
       return raw.trim();
     }
     return '拉流失败，请检查直播间链接与网络后重试';
