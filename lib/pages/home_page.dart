@@ -15,6 +15,7 @@ import 'package:kmxzs/services/obs_config.dart';
 import 'package:kmxzs/services/obs_ws.dart';
 import 'package:kmxzs/services/path_finder.dart';
 import 'package:kmxzs/services/prefs_keys.dart';
+import 'package:kmxzs/services/pull_error_copy.dart';
 import 'package:kmxzs/services/win_shell.dart';
 import 'package:kmxzs/app_version.dart';
 import 'package:kmxzs/config/app_config.dart';
@@ -54,22 +55,21 @@ abstract class _HomePageBase extends State<HomePage> {
   final _roomUrlCtrl = TextEditingController();
   final _ksCookieCtrl = TextEditingController();
   final _ttCookieCtrl = TextEditingController();
-  final _hotkeyCtrl = TextEditingController(text: KwaiHotkey.defaultHotkey);
+  final _startHotkeyCtrl =
+      TextEditingController(text: KwaiHotkey.defaultHotkey);
+  final _endHotkeyCtrl = TextEditingController(text: KwaiHotkey.defaultHotkey);
 
   bool _skipCompanion = false;
 
   bool _busy = false;
   String _status = '未连接';
-  String _log = '拉流模式：填写直播间链接后点「一键开始」。';
+  String _log = '拉流模式：填写直播间链接后点「一键开播」。';
 
   bool _memOpt = false;
   bool _autoClickStartLive = true;
   bool _autoStopOnMediaEnd = true;
 
-  bool _pullBaseline = false;
-  bool _wasPlaying = false;
-  int _endedStreak = 0;
-  int _playingStreak = 0;
+  final _pullMonitor = PullMonitorPolicy();
   bool _endStopRunning = false;
   bool _memRunning = false;
   DateTime? _lastMemLog;
@@ -88,9 +88,53 @@ abstract class _HomePageBase extends State<HomePage> {
 
   String get _companionPath => _companionPathCtrl.text.trim();
 
-  bool get _isKwaiCompanion {
-    final path = _companionPath.toLowerCase();
-    return path.contains('kwailive') || path.contains('快手');
+  CompanionKind get _companionKind => CompanionKind.fromPath(_companionPath);
+
+  String get _effectiveStartHotkey {
+    final raw = _startHotkeyCtrl.text.trim();
+    if (raw.isNotEmpty) return raw;
+    return _companionKind.defaultStartHotkey;
+  }
+
+  String get _effectiveEndHotkey {
+    if (!_companionKind.usesSeparateHotkeys) {
+      return _effectiveStartHotkey;
+    }
+    final raw = _endHotkeyCtrl.text.trim();
+    if (raw.isNotEmpty) return raw;
+    return _companionKind.defaultEndHotkey;
+  }
+
+  void _syncHotkeyDefaultsForKind(CompanionKind kind) {
+    final start = _startHotkeyCtrl.text.trim();
+    final end = _endHotkeyCtrl.text.trim();
+    final legacy = KwaiHotkey.normalize(start.isNotEmpty ? start : end);
+    switch (kind) {
+      case CompanionKind.kuaishou:
+        final value = legacy.isNotEmpty ? legacy : kind.defaultStartHotkey;
+        if (start.isEmpty) {
+          _startHotkeyCtrl.text = value;
+        }
+        if (end.isEmpty) {
+          _endHotkeyCtrl.text = value;
+        }
+        break;
+      case CompanionKind.douyin:
+        if (start.isEmpty) {
+          _startHotkeyCtrl.text = kind.defaultStartHotkey;
+        }
+        final looksLegacySingle =
+            (start.isEmpty || start == kind.defaultStartHotkey) &&
+                (end.isEmpty || end == kind.defaultStartHotkey);
+        if (end.isEmpty || looksLegacySingle) {
+          _endHotkeyCtrl.text = kind.defaultEndHotkey;
+        }
+        break;
+      case CompanionKind.tiktok:
+      case CompanionKind.unknown:
+        // 保持用户现有输入，不做覆盖。
+        break;
+    }
   }
 
   void _appendLog(String msg) {
@@ -140,13 +184,19 @@ abstract class _HomePageBase extends State<HomePage> {
     await sp.setString(PrefsKeys.kuaishouCookie, cleanKs);
     await sp.setString(PrefsKeys.tiktokCookie, _ttCookieCtrl.text.trim());
     _flvExtractor.kuaishouCookie = cleanKs.isEmpty ? null : cleanKs;
-    _flvExtractor.tiktokCookie = _ttCookieCtrl.text.trim().isEmpty
-        ? null
-        : _ttCookieCtrl.text.trim();
+    _flvExtractor.tiktokCookie =
+        _ttCookieCtrl.text.trim().isEmpty ? null : _ttCookieCtrl.text.trim();
     await sp.setBool(PrefsKeys.memOpt, _memOpt);
     await sp.setBool(PrefsKeys.autoClickStartLive, _autoClickStartLive);
     await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
-    await sp.setString(PrefsKeys.liveHotkey, _hotkeyCtrl.text.trim());
+    final startHotkey = _startHotkeyCtrl.text.trim();
+    final endHotkey = _endHotkeyCtrl.text.trim();
+    await sp.setString(PrefsKeys.startLiveHotkey, startHotkey);
+    await sp.setString(PrefsKeys.endLiveHotkey, endHotkey);
+    final kind = _companionKind;
+    final legacyHotkey =
+        kind.usesSeparateHotkeys ? _effectiveStartHotkey : _effectiveEndHotkey;
+    await sp.setString(PrefsKeys.liveHotkey, legacyHotkey);
   }
 
   Future<void> _launchExe(String path, {List<String> args = const []}) async {
@@ -232,7 +282,6 @@ class _HomePageState extends _HomePageBase
         _MemController,
         _KuaishouController,
         _ObsController {
-
   @override
   void initState() {
     super.initState();
@@ -254,7 +303,8 @@ class _HomePageState extends _HomePageBase
     _roomUrlCtrl.dispose();
     _ksCookieCtrl.dispose();
     _ttCookieCtrl.dispose();
-    _hotkeyCtrl.dispose();
+    _startHotkeyCtrl.dispose();
+    _endHotkeyCtrl.dispose();
     super.dispose();
   }
 
@@ -288,19 +338,30 @@ class _HomePageState extends _HomePageBase
     }
     _ttCookieCtrl.text = sp.getString(PrefsKeys.tiktokCookie) ?? '';
     _flvExtractor.kuaishouCookie = cleanKs.isEmpty ? null : cleanKs;
-    _flvExtractor.tiktokCookie = _ttCookieCtrl.text.trim().isEmpty
-        ? null
-        : _ttCookieCtrl.text.trim();
+    _flvExtractor.tiktokCookie =
+        _ttCookieCtrl.text.trim().isEmpty ? null : _ttCookieCtrl.text.trim();
     _memOpt = sp.getBool(PrefsKeys.memOpt) ?? false;
     _autoClickStartLive = sp.getBool(PrefsKeys.autoClickStartLive) ?? true;
     _autoStopOnMediaEnd = sp.getBool(PrefsKeys.autoStopOnMediaEnd) ?? true;
-    final rawHotkey = sp.getString(PrefsKeys.liveHotkey) ??
-        sp.getString(PrefsKeys.startLiveHotkey) ??
-        sp.getString(PrefsKeys.endLiveHotkey);
-    _hotkeyCtrl.text = KwaiHotkey.normalize(rawHotkey);
-    if (_hotkeyCtrl.text != (rawHotkey ?? '').trim()) {
-      await sp.setString(PrefsKeys.liveHotkey, _hotkeyCtrl.text);
+    final kind = _companionKind;
+    final rawLegacyHotkey = sp.getString(PrefsKeys.liveHotkey);
+    final rawStartHotkey = sp.getString(PrefsKeys.startLiveHotkey);
+    final rawEndHotkey = sp.getString(PrefsKeys.endLiveHotkey);
+    if (kind.usesSeparateHotkeys) {
+      _startHotkeyCtrl.text =
+          (rawStartHotkey ?? rawLegacyHotkey ?? kind.defaultStartHotkey).trim();
+      _endHotkeyCtrl.text = (rawEndHotkey ?? kind.defaultEndHotkey).trim();
+    } else {
+      final single = KwaiHotkey.normalize(
+        rawLegacyHotkey ?? rawStartHotkey ?? rawEndHotkey,
+      );
+      _startHotkeyCtrl.text = single;
+      _endHotkeyCtrl.text = single;
+      if (_startHotkeyCtrl.text != (rawLegacyHotkey ?? '').trim()) {
+        await sp.setString(PrefsKeys.liveHotkey, _startHotkeyCtrl.text);
+      }
     }
+    _syncHotkeyDefaultsForKind(kind);
 
     if (!await _pathExists(_obsPathCtrl.text)) {
       await _detectObsPath(silent: true);
@@ -362,10 +423,7 @@ class _HomePageState extends _HomePageBase
     }
     if (!await _ensureLicense()) return;
     setState(() => _busy = true);
-    _pullBaseline = false;
-    _wasPlaying = false;
-    _endedStreak = 0;
-    _playingStreak = 0;
+    _pullMonitor.reset();
     _endStopRunning = false;
     _obsWs.resetPullMonitor();
     try {
@@ -402,13 +460,19 @@ class _HomePageState extends _HomePageBase
         extracted = await _flvExtractor.extract(room);
       }
       if (!extracted.ok || extracted.bestUrl().isEmpty) {
-        final tip = _friendlyPullError(extracted.message);
+        final tip = _friendlyPullError(
+          extracted.message,
+          platform: extracted.platform,
+        );
         _appendLog('拉流失败: $tip');
         if (tip != extracted.message) {
           _appendLog(extracted.message);
         }
         _toast(tip);
-        await _maybePromptKuaishouLogin(extracted.message);
+        if (extracted.platform == LivePlatform.kuaishou ||
+            FlvExtractor.looksLikeKuaishou(room)) {
+          await _maybePromptKuaishouLogin(extracted.message);
+        }
         return;
       }
       final pullUrl = extracted.bestUrl();
@@ -428,10 +492,14 @@ class _HomePageState extends _HomePageBase
       }
       setState(() => _status = '已就绪');
       _startMediaMonitor();
-      if (_autoClickStartLive && !_skipCompanion && _isKwaiCompanion) {
-        _appendLog('正在发送开播快捷键…');
-        final start = await KwaiLiveStarter.instance.tryStartLive(
-          hotkey: _hotkeyCtrl.text,
+      final kind = _companionKind;
+      if (_autoClickStartLive &&
+          !_skipCompanion &&
+          kind != CompanionKind.unknown) {
+        _appendLog('正在发送开播快捷键（${kind.label}）…');
+        final start = await CompanionStarter.instance.tryStartLive(
+          kind: kind,
+          hotkey: _effectiveStartHotkey,
         );
         _appendLog(start.message);
         if (start.needsElevation) {
@@ -603,7 +671,7 @@ class _HomePageState extends _HomePageBase
                     onPressed: _busy ? null : _runPullPipeline,
                     icon: Icon(_busy ? Icons.hourglass_top : Icons.play_arrow),
                     label: Text(
-                      _busy ? '执行中...' : '一键开始',
+                      _busy ? '执行中...' : '一键开播',
                       style: const TextStyle(fontSize: 16),
                     ),
                   ),
@@ -658,6 +726,16 @@ class _HomePageState extends _HomePageBase
                       ),
                     ),
                   ),
+                ),
+                const SizedBox(height: 12),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('关于'),
+                  subtitle: const Text(
+                    '${AppConfig.productName}  v${AppVersion.name}\n${AppAbout.publisherLine}',
+                  ),
+                  onTap: () => AppAbout.show(context),
                 ),
                 const SizedBox(height: 12),
                 const Text(

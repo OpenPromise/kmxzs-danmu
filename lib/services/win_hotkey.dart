@@ -323,6 +323,137 @@ class WinHotkey {
     });
   }
 
+  // ── 抖音直播伴侣（Electron / Chrome_WidgetWin_1）─────────────────────────
+
+  /// 抖音关播确认框尺寸：逻辑像素约 280×162，150% DPI 约 420×243。
+  static bool isDouyinStopConfirmSize(int w, int h) {
+    if (w < 220 || w > 520) return false;
+    if (h < 120 || h > 320) return false;
+    final ar = w / h;
+    return ar >= 1.4 && ar <= 2.2;
+  }
+
+  /// 点抖音关播确认弹窗里的粉色「确认」按钮。
+  /// 逻辑与快手版相同，但只找 exe=直播伴侣 + Chrome_WidgetWin_1 窗口。
+  static Future<bool> clickDouyinStopConfirm() async {
+    if (!isSupported) return false;
+    lastConfirmDetail = '';
+    final wnds = _listDouyinWnds();
+    final candidates = wnds
+        .where((w) => !w.iconic && isDouyinStopConfirmSize(w.width, w.height))
+        .toList();
+    candidates.sort((a, b) {
+      final sa = (a.width * a.height - 45360).abs();
+      final sb = (b.width * b.height - 45360).abs();
+      return sa.compareTo(sb);
+    });
+    lastConfirmDetail =
+        'dy_cand=${candidates.map((w) => '${w.width}x${w.height}').join(',')}';
+    if (candidates.isEmpty) return false;
+
+    _raiseHwnd(candidates.first.hwnd);
+    await Future<void>.delayed(const Duration(milliseconds: 120));
+
+    var bestN = 0;
+    var bestX = 0;
+    var bestY = 0;
+    _Wnd? pinkWnd;
+    for (final w in candidates.take(4)) {
+      final hit = _pinkButtonInHwnd(w) ??
+          _pinkButtonInRect(w.left, w.top, w.width, w.height);
+      if (hit == null || hit.n <= bestN) continue;
+      bestN = hit.n;
+      bestX = hit.x;
+      bestY = hit.y;
+      pinkWnd = w;
+    }
+
+    final target = pinkWnd ?? candidates.first;
+    final x = pinkWnd == null
+        ? target.left + (target.width * 0.72).round()
+        : bestX;
+    final y = pinkWnd == null
+        ? target.top + (target.height * 0.78).round()
+        : bestY;
+    lastConfirmDetail += pinkWnd == null
+        ? ' dy_fallback ${target.width}x${target.height} @$x,$y'
+        : ' dy_pink n=$bestN ${target.width}x${target.height} @$x,$y';
+
+    final ok = await _clickAt(x, y, hwnd: target.hwnd);
+    lastConfirmDetail += ok ? ' clicked' : ' click-fail';
+    return ok;
+  }
+
+  /// 抖音关播弹窗是否可见。
+  static bool douyinStopConfirmVisible() {
+    if (!isSupported) return false;
+    return _listDouyinWnds()
+        .any((w) => !w.iconic && isDouyinStopConfirmSize(w.width, w.height));
+  }
+
+  /// 枚举抖音直播伴侣（直播伴侣.exe / webcast_mate.exe）的所有可见窗口。
+  static List<_Wnd> _listDouyinWnds() {
+    final found = <_Wnd>[];
+    final pidPtr = calloc<Uint32>();
+    final classBuf = calloc<Uint16>(256);
+    final titleBuf = calloc<Uint16>(256);
+    final exeCache = <int, String>{};
+
+    int proc(int hwnd, int lParam) {
+      if (_a.isWindowVisible(hwnd) == 0) return 1;
+      pidPtr.value = 0;
+      _a.getWindowThreadProcessId(hwnd, pidPtr);
+      final pid = pidPtr.value;
+      if (pid == 0) return 1;
+      final exe = exeCache.putIfAbsent(pid, () => _exeName(pid));
+      final el = exe.toLowerCase();
+      final isDouyin = el.endsWith('\\直播伴侣.exe') ||
+          el == '直播伴侣.exe' ||
+          el.contains('webcast_mate') ||
+          el.contains('webcastmate');
+      if (!isDouyin) return 1;
+      classBuf[0] = 0;
+      _a.getClassName(hwnd, classBuf.cast(), 256);
+      final cls = classBuf.cast<Utf16>().toDartString();
+      if (!cls.contains('Chrome_WidgetWin')) return 1;
+      titleBuf[0] = 0;
+      _a.getWindowText(hwnd, titleBuf.cast(), 256);
+      final rc = calloc<_WinRect>();
+      try {
+        _a.getWindowRect(hwnd, rc);
+        found.add(
+          _Wnd(
+            hwnd: hwnd,
+            cls: cls,
+            title: titleBuf.cast<Utf16>().toDartString(),
+            left: rc.ref.left,
+            top: rc.ref.top,
+            width: rc.ref.right - rc.ref.left,
+            height: rc.ref.bottom - rc.ref.top,
+            iconic: _a.isIconic(hwnd) != 0,
+          ),
+        );
+      } finally {
+        calloc.free(rc);
+      }
+      return 1;
+    }
+
+    final cb = NativeCallable<_EnumWindowsProcNative>.isolateLocal(
+      proc,
+      exceptionalReturn: 0,
+    );
+    try {
+      _a.enumWindows(cb.nativeFunction, 0);
+    } finally {
+      cb.close();
+      calloc.free(pidPtr);
+      calloc.free(classBuf);
+      calloc.free(titleBuf);
+    }
+    return found;
+  }
+
   static int _confirmScore(_Wnd w) {
     var s = 0;
     if (w.cls.contains('ToolSaveBits') || w.cls.contains('QWindowTool')) {

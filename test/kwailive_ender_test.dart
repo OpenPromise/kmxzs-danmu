@@ -81,4 +81,71 @@ void main() {
     expect(WinHotkey.isStopConfirmSize(1544, 991), isFalse);
     expect(WinHotkey.isStopConfirmSize(225, 400), isFalse);
   });
+
+  group('CompanionKind.fromPath', () {
+    test('快手 KwaiLive', () {
+      expect(
+        CompanionKind.fromPath(r'C:\Program Files\KwaiLive\KwaiLive.exe'),
+        CompanionKind.kuaishou,
+      );
+      expect(
+        CompanionKind.fromPath(r'D:\快手直播伴侣\kwailive.exe'),
+        CompanionKind.kuaishou,
+      );
+    });
+
+    test('抖音直播伴侣', () {
+      expect(
+        CompanionKind.fromPath(r'C:\Users\foo\AppData\Local\webcast_mate\App\webcast_mate.exe'),
+        CompanionKind.douyin,
+      );
+      expect(
+        CompanionKind.fromPath(r'D:\直播伴侣\直播伴侣.exe'),
+        CompanionKind.douyin,
+      );
+    });
+
+    test('TikTok LIVE Studio', () {
+      expect(
+        CompanionKind.fromPath(r'C:\Program Files\TikTok LIVE Studio\TikTok LIVE Studio.exe'),
+        CompanionKind.tiktok,
+      );
+      expect(
+        CompanionKind.fromPath(r'C:\Users\foo\AppData\Local\TikTokLiveStudio\app\tiktoklivestudio.exe'),
+        CompanionKind.tiktok,
+      );
+    });
+
+    test('空路径或未知路径返回 unknown', () {
+      expect(CompanionKind.fromPath(''), CompanionKind.unknown);
+      expect(
+        CompanionKind.fromPath(r'C:\StreamLabs\Streamlabs.exe'),
+        CompanionKind.unknown,
+      );
+    });
+
+    test('不同伴侣的默认开播/关播快捷键符合预期', () {
+      expect(CompanionKind.kuaishou.usesSeparateHotkeys, isFalse);
+      expect(CompanionKind.kuaishou.defaultStartHotkey, 'Alt+P');
+      expect(CompanionKind.kuaishou.defaultEndHotkey, 'Alt+P');
+
+      expect(CompanionKind.douyin.usesSeparateHotkeys, isTrue);
+      expect(CompanionKind.douyin.defaultStartHotkey, 'Alt+P');
+      expect(CompanionKind.douyin.defaultEndHotkey, 'Alt+O');
+
+      expect(CompanionKind.tiktok.usesSeparateHotkeys, isFalse);
+      expect(CompanionKind.tiktok.defaultStartHotkey, isEmpty);
+      expect(CompanionKind.tiktok.defaultEndHotkey, isEmpty);
+
+      expect(CompanionKind.unknown.defaultStartHotkey, isEmpty);
+      expect(CompanionKind.unknown.defaultEndHotkey, isEmpty);
+    });
+
+    test('快手和抖音需要点关播确认弹窗，TikTok 和 unknown 不需要', () {
+      expect(CompanionKind.kuaishou.needsStopConfirm, isTrue);
+      expect(CompanionKind.douyin.needsStopConfirm, isTrue);
+      expect(CompanionKind.tiktok.needsStopConfirm, isFalse);
+      expect(CompanionKind.unknown.needsStopConfirm, isFalse);
+    });
+  });
 }

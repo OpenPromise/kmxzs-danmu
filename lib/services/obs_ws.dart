@@ -6,7 +6,104 @@ import 'package:kmxzs/services/flv_extractor.dart';
 enum ObsWsState { disconnected, connecting, connected, streaming }
 
 /// 拉流媒体源状态（供主页轮询判断开播/关播）。
-enum PullState { idle, playing, ended }
+enum PullState { idle, playing, unstable, ended }
+
+enum PullMonitorAction { none, unstable, recovered, ended }
+
+class PullProbeResult {
+  final PullState state;
+  final int? lastCursor;
+  final int stallTicks;
+
+  const PullProbeResult({
+    required this.state,
+    required this.lastCursor,
+    required this.stallTicks,
+  });
+}
+
+class PullMonitorPolicy {
+  static const int playingTicksToRecover = 3;
+  static const int unstableTicksToEnd = 7;
+  static const int endedTicksToEnd = 6;
+
+  bool _baseline = false;
+  bool _wasPlaying = false;
+  bool _unstableLogged = false;
+  int _playingStreak = 0;
+  int _unstableStreak = 0;
+  int _endedStreak = 0;
+
+  void reset() {
+    _baseline = false;
+    _wasPlaying = false;
+    _unstableLogged = false;
+    _playingStreak = 0;
+    _unstableStreak = 0;
+    _endedStreak = 0;
+  }
+
+  PullMonitorAction update(PullState pull) {
+    if (pull == PullState.idle) {
+      _playingStreak = 0;
+      return PullMonitorAction.none;
+    }
+    if (!_baseline) {
+      _baseline = true;
+      _wasPlaying = pull == PullState.playing;
+      _playingStreak = 0;
+      _unstableStreak = 0;
+      _endedStreak = 0;
+      _unstableLogged = false;
+      return PullMonitorAction.none;
+    }
+    if (pull == PullState.playing) {
+      _playingStreak++;
+      if (_playingStreak < playingTicksToRecover) {
+        return PullMonitorAction.none;
+      }
+      final recovered = !_wasPlaying ||
+          _unstableLogged ||
+          _unstableStreak > 0 ||
+          _endedStreak > 0;
+      _wasPlaying = true;
+      _unstableLogged = false;
+      _unstableStreak = 0;
+      _endedStreak = 0;
+      return recovered ? PullMonitorAction.recovered : PullMonitorAction.none;
+    }
+
+    _playingStreak = 0;
+    if (!_wasPlaying) return PullMonitorAction.none;
+
+    if (pull == PullState.unstable) {
+      _unstableStreak++;
+      _endedStreak = 0;
+      if (!_unstableLogged) {
+        _unstableLogged = true;
+        return PullMonitorAction.unstable;
+      }
+      if (_unstableStreak < unstableTicksToEnd) {
+        return PullMonitorAction.none;
+      }
+      _wasPlaying = false;
+      _unstableLogged = false;
+      _unstableStreak = 0;
+      _endedStreak = 0;
+      return PullMonitorAction.ended;
+    }
+
+    _endedStreak++;
+    _unstableStreak = 0;
+    if (_endedStreak < endedTicksToEnd) {
+      return PullMonitorAction.none;
+    }
+    _wasPlaying = false;
+    _unstableLogged = false;
+    _endedStreak = 0;
+    return PullMonitorAction.ended;
+  }
+}
 
 class ObsWs {
   ObsWebSocket? _client;
@@ -15,6 +112,56 @@ class ObsWs {
   int _cursorStallTicks = 0;
 
   static const mediaSourceName = '直播拉流';
+
+  static PullProbeResult probeMediaStatus({
+    required ObsMediaState mediaState,
+    required int? lastCursor,
+    required int? mediaCursor,
+    required int stallTicks,
+    int unstableAfterStallTicks = 1,
+  }) {
+    switch (mediaState) {
+      case ObsMediaState.playing:
+      case ObsMediaState.opening:
+      case ObsMediaState.buffering:
+        final cursor = mediaCursor ?? 0;
+        if (lastCursor != null && cursor == lastCursor) {
+          final nextStallTicks = stallTicks + 1;
+          if (nextStallTicks >= unstableAfterStallTicks) {
+            return PullProbeResult(
+              state: PullState.unstable,
+              lastCursor: lastCursor,
+              stallTicks: nextStallTicks,
+            );
+          }
+          return PullProbeResult(
+            state: PullState.playing,
+            lastCursor: lastCursor,
+            stallTicks: nextStallTicks,
+          );
+        }
+        return PullProbeResult(
+          state: PullState.playing,
+          lastCursor: cursor,
+          stallTicks: 0,
+        );
+      case ObsMediaState.stopped:
+      case ObsMediaState.ended:
+      case ObsMediaState.error:
+        return const PullProbeResult(
+          state: PullState.ended,
+          lastCursor: null,
+          stallTicks: 0,
+        );
+      case ObsMediaState.paused:
+      case ObsMediaState.none:
+        return const PullProbeResult(
+          state: PullState.idle,
+          lastCursor: null,
+          stallTicks: 0,
+        );
+    }
+  }
 
   Future<void> connect(String url, {String? password}) async {
     state = ObsWsState.connecting;
@@ -165,8 +312,8 @@ class ObsWs {
   Future<String> _applyPullMediaUrl(String mediaUrl) async {
     final c = _requireClient;
     final scene = await c.scenes.getCurrentProgramScene().timeout(
-      const Duration(seconds: 8),
-    );
+          const Duration(seconds: 8),
+        );
 
     final isHls = _isHls(mediaUrl);
     final isFlv = _isFlv(mediaUrl);
@@ -191,8 +338,8 @@ class ObsWs {
     };
 
     final inputs = await c.inputs.getInputList(null).timeout(
-      const Duration(seconds: 8),
-    );
+          const Duration(seconds: 8),
+        );
     final exists = inputs.any((i) => i.inputName == mediaSourceName);
     if (exists) {
       await c.inputs
@@ -259,29 +406,15 @@ class ObsWs {
       final st = await c.mediaInputs
           .getMediaInputStatus(inputName: mediaSourceName)
           .timeout(const Duration(seconds: 5));
-      switch (st.mediaState) {
-        case ObsMediaState.playing:
-        case ObsMediaState.opening:
-        case ObsMediaState.buffering:
-          final cursor = st.mediaCursor ?? 0;
-          if (_lastMediaCursor != null && cursor == _lastMediaCursor) {
-            _cursorStallTicks++;
-            // 直播进度卡住：ffmpeg 断流后仍可能短暂报 playing
-            if (_cursorStallTicks >= 2) return PullState.ended;
-          } else {
-            _lastMediaCursor = cursor;
-            _cursorStallTicks = 0;
-          }
-          return PullState.playing;
-        case ObsMediaState.stopped:
-        case ObsMediaState.ended:
-        case ObsMediaState.error:
-          _cursorStallTicks = 0;
-          return PullState.ended;
-        case ObsMediaState.paused:
-        case ObsMediaState.none:
-          return PullState.idle;
-      }
+      final probed = probeMediaStatus(
+        mediaState: st.mediaState,
+        lastCursor: _lastMediaCursor,
+        mediaCursor: st.mediaCursor,
+        stallTicks: _cursorStallTicks,
+      );
+      _lastMediaCursor = probed.lastCursor;
+      _cursorStallTicks = probed.stallTicks;
+      return probed.state;
     } catch (_) {
       // 拉不到状态按 idle 处理（不触发关播/开播逻辑），避免误判
       return PullState.idle;
@@ -304,15 +437,13 @@ class ObsWs {
       // 切换推流服务前停止旧推流属尽力而为，失败继续覆盖配置
     }
 
-    await c.config
-        .setStreamServiceSettings(
-          streamServiceType: 'rtmp_custom',
-          streamServiceSettings: {
-            'server': server,
-            'key': key,
-          },
-        )
-        .timeout(const Duration(seconds: 8));
+    await c.config.setStreamServiceSettings(
+      streamServiceType: 'rtmp_custom',
+      streamServiceSettings: {
+        'server': server,
+        'key': key,
+      },
+    ).timeout(const Duration(seconds: 8));
     await c.stream.startStream().timeout(const Duration(seconds: 8));
     state = ObsWsState.streaming;
   }
@@ -333,8 +464,8 @@ class ObsWs {
     final c = _requireClient;
     try {
       final active = await c.outputs.getVirtualCamStatus().timeout(
-        const Duration(seconds: 5),
-      );
+            const Duration(seconds: 5),
+          );
       if (active) {
         return '虚拟摄像机已在运行';
       }
@@ -348,8 +479,8 @@ class ObsWs {
       // 部分版本 Start 在已开启时会报错，再 Toggle 一次兜底
       try {
         final on = await c.outputs.toggleVirtualCam().timeout(
-          const Duration(seconds: 8),
-        );
+              const Duration(seconds: 8),
+            );
         if (on) return '虚拟摄像机已开启（toggle）';
         // toggle 关掉了，再开一次
         await c.outputs.startVirtualCam().timeout(const Duration(seconds: 8));
@@ -364,8 +495,8 @@ class ObsWs {
     await Future.delayed(const Duration(milliseconds: 400));
     try {
       final ok = await c.outputs.getVirtualCamStatus().timeout(
-        const Duration(seconds: 5),
-      );
+            const Duration(seconds: 5),
+          );
       if (!ok) {
         throw StateError('已发送启动指令，但虚拟摄像机仍未激活');
       }

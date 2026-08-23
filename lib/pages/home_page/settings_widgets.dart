@@ -227,7 +227,10 @@ class _SettingsPanelState extends State<_SettingsPanel> {
             onDetect: () => s._detectCompanionPath(),
             onPick: s._pickCompanionPath,
             onChanged: (_) {
-              s._skipCompanion = false;
+              setState(() {
+                s._skipCompanion = false;
+                s._syncHotkeyDefaultsForKind(s._companionKind);
+              });
               s._schedulePersist();
             },
           ),
@@ -249,8 +252,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('一键开始后自动开播'),
-            subtitle: const Text('与关播共用同一快捷键（默认 Alt+P）'),
+            title: const Text('自动开关播'),
             value: s._autoClickStartLive,
             onChanged: (v) async {
               setState(() => s._autoClickStartLive = v);
@@ -260,7 +262,6 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
             title: const Text('源直播结束后自动关播'),
-            subtitle: const Text('快捷键关播，并自动确认弹窗'),
             value: s._autoStopOnMediaEnd,
             onChanged: (v) async {
               setState(() => s._autoStopOnMediaEnd = v);
@@ -269,28 +270,55 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
           if (s._autoClickStartLive || s._autoStopOnMediaEnd) ...[
             const SizedBox(height: 8),
-            TextField(
-              controller: s._hotkeyCtrl,
-              onChanged: (_) => s._schedulePersist(),
-              decoration: const InputDecoration(
-                labelText: '开关播快捷键',
-                hintText: 'Alt+P',
-                helperText: '与伴侣设置里一致；关播后会再点确认弹窗',
-                filled: true,
-                fillColor: Colors.white,
-                border: OutlineInputBorder(),
-              ),
+            Builder(
+              builder: (context) {
+                final kind = s._companionKind;
+                if (kind.usesSeparateHotkeys) {
+                  return Column(
+                    children: [
+                      TextField(
+                        controller: s._startHotkeyCtrl,
+                        onChanged: (_) => s._schedulePersist(),
+                        decoration: InputDecoration(
+                          labelText: '开播快捷键',
+                          hintText: kind.startHotkeyHint,
+                          filled: true,
+                          fillColor: Colors.white,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: s._endHotkeyCtrl,
+                        onChanged: (_) => s._schedulePersist(),
+                        decoration: InputDecoration(
+                          labelText: '关播快捷键',
+                          hintText: kind.endHotkeyHint,
+                          filled: true,
+                          fillColor: Colors.white,
+                          border: const OutlineInputBorder(),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+                return TextField(
+                  controller: s._startHotkeyCtrl,
+                  onChanged: (_) {
+                    s._endHotkeyCtrl.text = s._startHotkeyCtrl.text;
+                    s._schedulePersist();
+                  },
+                  decoration: InputDecoration(
+                    labelText: '开播快捷键',
+                    hintText: kind.startHotkeyHint,
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: const OutlineInputBorder(),
+                  ),
+                );
+              },
             ),
           ],
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.info_outline),
-            title: const Text('关于'),
-            subtitle: const Text(
-              '${AppConfig.productName}  v${AppVersion.name}\n${AppAbout.publisherLine}',
-            ),
-            onTap: () => AppAbout.show(context),
-          ),
           Theme(
             data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
             child: ExpansionTile(

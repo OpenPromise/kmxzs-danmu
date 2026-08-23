@@ -129,6 +129,7 @@ mixin _PathSetupController on _HomePageBase {
     }
     _companionPathCtrl.text = path;
     _skipCompanion = false;
+    _syncHotkeyDefaultsForKind(_companionKind);
     await _persist();
     if (!silent) _appendLog('直播伴侣: $path');
     setState(() {});
@@ -155,6 +156,7 @@ mixin _PathSetupController on _HomePageBase {
     if (r == null || r.files.single.path == null) return false;
     _companionPathCtrl.text = r.files.single.path!;
     _skipCompanion = false;
+    _syncHotkeyDefaultsForKind(_companionKind);
     await _persist();
     setState(() {});
     return true;

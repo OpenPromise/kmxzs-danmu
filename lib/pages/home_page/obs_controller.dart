@@ -57,46 +57,8 @@ mixin _ObsController on _HomePageBase {
     }
   }
 
-  String _friendlyPullError(String raw) {
-    final m = raw.toLowerCase();
-    if (m.contains('result=2') ||
-        m.contains('400002') ||
-        m.contains('操作频繁') ||
-        m.contains('操作太快') ||
-        m.contains('风控') ||
-        m.contains('captcha')) {
-      return '操作过于频繁，请关闭代理后等几分钟再试';
-    }
-    if (m.contains('tiktok')) {
-      return 'TikTok 解析失败。请确认正在直播并关闭代理后重试';
-    }
-    if (m.contains('未开播') ||
-        m.contains('not live') ||
-        m.contains('offline') ||
-        m.contains('直播已结束')) {
-      return '直播间似乎未开播，请确认链接后重试';
-    }
-    if (m.contains('web_st') ||
-        m.contains('cookie') ||
-        m.contains('请先登录') ||
-        m.contains('登录快手') ||
-        m.contains('未登录')) {
-      return '请先登录快手账号后再试';
-    }
-    if (m.contains('timeout') || m.contains('timed out') || m.contains('连接')) {
-      return '网络连接失败。若开了代理，请先关闭或将目标域名设为直连';
-    }
-    if (raw.trim().isEmpty) return '拉流提取失败，请检查链接与网络';
-    if (m.contains('滑块') ||
-        m.contains('关闭快手') ||
-        m.contains('未拿到') ||
-        m.contains('webview') ||
-        m.contains('间隔过短') ||
-        m.contains('被风控') ||
-        m.contains('秒后再试')) {
-      return raw.trim();
-    }
-    return '拉流失败，请检查直播间链接与网络后重试';
+  String _friendlyPullError(String raw, {LivePlatform platform = LivePlatform.unknown}) {
+    return PullErrorCopy.userFacing(raw, platform: platform);
   }
 
   void _startMediaMonitor() {
@@ -107,57 +69,40 @@ mixin _ObsController on _HomePageBase {
     );
   }
 
-  static const _endedTicksNeeded = 3;
-  static const _playingTicksToCancel = 5;
-
   Future<void> _tickMediaMonitor() async {
     if (_busy || !mounted || _endStopRunning) return;
     final pull = await _obsWs.pullState();
-    if (pull == PullState.idle) {
-      _playingStreak = 0;
-      return;
-    }
-    if (!_pullBaseline) {
-      _pullBaseline = true;
-      _wasPlaying = pull == PullState.playing;
-      _endedStreak = 0;
-      _playingStreak = 0;
-      return;
-    }
-    if (pull == PullState.playing) {
-      _playingStreak++;
-      // ffmpeg 断流后会反复重连，单次 playing 不取消关播确认
-      if (_playingStreak < _playingTicksToCancel) return;
-      _endedStreak = 0;
-      if (!_wasPlaying) {
-        _wasPlaying = true;
+    switch (_pullMonitor.update(pull)) {
+      case PullMonitorAction.none:
+        return;
+      case PullMonitorAction.unstable:
+        _appendLog('OBS 持续未拿到新画面，等待恢复中…');
+        return;
+      case PullMonitorAction.recovered:
+        _appendLog('直播画面已恢复');
         try {
           _appendLog(await _obsWs.ensureVirtualCamStarted());
         } catch (e) {
           _appendLog('重启虚拟摄像机失败: $e');
         }
         if (mounted) setState(() => _status = '已就绪');
-      }
-      return;
+        return;
+      case PullMonitorAction.ended:
+        await _handleConfirmedMediaEnd();
+        return;
     }
+  }
 
-    _playingStreak = 0;
-    if (pull != PullState.ended || !_wasPlaying) return;
-
-    _endedStreak++;
-    if (_endedStreak == 1) {
-      _appendLog('检测到源直播可能已结束，确认中…');
-    }
-    if (_endedStreak < _endedTicksNeeded) return;
-
-    _wasPlaying = false;
+  Future<void> _handleConfirmedMediaEnd() async {
     _endStopRunning = true;
-    _appendLog('源直播已结束');
+    _appendLog('源直播持续未提供新画面，判定已结束');
     if (_autoStopOnMediaEnd) {
-      if (!_skipCompanion && _isKwaiCompanion) {
-        _appendLog('正在发送关播快捷键…');
-        final end = await KwaiLiveStarter.instance.tryEndLive(
-          hotkey: _hotkeyCtrl.text,
+      final kind = _companionKind;
+      if (!_skipCompanion && kind != CompanionKind.unknown) {
+        _appendLog('正在发送关播快捷键（${kind.label}）…');
+        final end = await CompanionStarter.instance.tryEndLive(
+          kind: kind,
+          hotkey: _effectiveEndHotkey,
         );
         _appendLog(end.message);
         if (!end.ok) {
