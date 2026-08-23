@@ -17,6 +17,10 @@ import 'package:kmxzs/services/path_finder.dart';
 import 'package:kmxzs/services/prefs_keys.dart';
 import 'package:kmxzs/services/pull_error_copy.dart';
 import 'package:kmxzs/services/win_shell.dart';
+import 'package:kmxzs/services/danmaku/danmaku_bridge.dart';
+import 'package:kmxzs/services/danmaku/danmaku_client.dart';
+import 'package:kmxzs/services/danmaku/danmaku_message.dart';
+import 'package:flutter/services.dart';
 import 'package:kmxzs/app_version.dart';
 import 'package:kmxzs/config/app_config.dart';
 import 'package:kmxzs/widgets/about.dart';
@@ -30,6 +34,7 @@ part 'home_page/mem_controller.dart';
 part 'home_page/ks_login_controller.dart';
 part 'home_page/obs_controller.dart';
 part 'home_page/settings_widgets.dart';
+part 'home_page/danmaku_controller.dart';
 
 /// 主页：拉流虚拟摄像机模式。
 class HomePage extends StatefulWidget {
@@ -68,6 +73,7 @@ abstract class _HomePageBase extends State<HomePage> {
   bool _memOpt = false;
   bool _autoClickStartLive = true;
   bool _autoStopOnMediaEnd = true;
+  bool _danmakuEnabled = true;
 
   final _pullMonitor = PullMonitorPolicy();
   bool _endStopRunning = false;
@@ -189,6 +195,7 @@ abstract class _HomePageBase extends State<HomePage> {
     await sp.setBool(PrefsKeys.memOpt, _memOpt);
     await sp.setBool(PrefsKeys.autoClickStartLive, _autoClickStartLive);
     await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
+    await sp.setBool(PrefsKeys.danmakuEnabled, _danmakuEnabled);
     final startHotkey = _startHotkeyCtrl.text.trim();
     final endHotkey = _endHotkeyCtrl.text.trim();
     await sp.setString(PrefsKeys.startLiveHotkey, startHotkey);
@@ -281,6 +288,7 @@ class _HomePageState extends _HomePageBase
         _LicenseController,
         _MemController,
         _KuaishouController,
+        _DanmakuController,
         _ObsController {
   @override
   void initState() {
@@ -297,6 +305,7 @@ class _HomePageState extends _HomePageBase
     _memTimer?.cancel();
     _licenseTimer?.cancel();
     _persistDebounce?.cancel();
+    unawaited(_stopDanmaku());
     _obsPathCtrl.dispose();
     _companionPathCtrl.dispose();
     _wsUrlCtrl.dispose();
@@ -343,6 +352,7 @@ class _HomePageState extends _HomePageBase
     _memOpt = sp.getBool(PrefsKeys.memOpt) ?? false;
     _autoClickStartLive = sp.getBool(PrefsKeys.autoClickStartLive) ?? true;
     _autoStopOnMediaEnd = sp.getBool(PrefsKeys.autoStopOnMediaEnd) ?? true;
+    await _loadDanmakuPrefs();
     final kind = _companionKind;
     final rawLegacyHotkey = sp.getString(PrefsKeys.liveHotkey);
     final rawStartHotkey = sp.getString(PrefsKeys.startLiveHotkey);
@@ -422,6 +432,7 @@ class _HomePageState extends _HomePageBase
       return;
     }
     if (!await _ensureLicense()) return;
+    await _stopDanmaku();
     setState(() => _busy = true);
     _pullMonitor.reset();
     _endStopRunning = false;
@@ -478,6 +489,10 @@ class _HomePageState extends _HomePageBase
       final pullUrl = extracted.bestUrl();
       final candidates = extracted.playCandidates();
       _appendLog('已获取直播地址（房间 ${extracted.roomId ?? '未知'}）');
+      final roomId = extracted.roomId;
+      if (roomId != null && roomId.isNotEmpty) {
+        await _startDanmaku(extracted.platform, roomId);
+      }
       _appendLog(
         await _obsWs.ensurePullMediaSource(
           pullUrl,
@@ -587,6 +602,7 @@ class _HomePageState extends _HomePageBase
       ),
     );
     if (ok != true) return;
+    await _stopDanmaku();
     await widget.auth.logout();
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
@@ -680,6 +696,8 @@ class _HomePageState extends _HomePageBase
                 Row(
                   children: [
                     _StatusChip(label: 'OBS', value: _status),
+                    const SizedBox(width: 8),
+                    _StatusChip(label: '弹幕', value: _danmakuStatus),
                     const Spacer(),
                     TextButton(
                       onPressed: _busy
@@ -692,6 +710,10 @@ class _HomePageState extends _HomePageBase
                               }
                             },
                       child: const Text('测试连接'),
+                    ),
+                    TextButton(
+                      onPressed: _openDanmakuPanel,
+                      child: const Text('弹幕面板'),
                     ),
                   ],
                 ),

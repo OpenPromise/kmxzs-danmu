@@ -1,7 +1,7 @@
 part of '../home_page.dart';
 
 /// OBS WebSocket 连接与媒体源/虚拟摄像机控制，以及拉流管线的 OBS 侧步骤。
-mixin _ObsController on _HomePageBase {
+mixin _ObsController on _HomePageBase, _DanmakuController {
   Future<void> _ensureObsReady() async {
     final fix = await _obsConfig.handleNew();
     _appendLog(
@@ -96,6 +96,7 @@ mixin _ObsController on _HomePageBase {
   Future<void> _handleConfirmedMediaEnd() async {
     _endStopRunning = true;
     _appendLog('源直播持续未提供新画面，判定已结束');
+    await _stopDanmaku();
     if (_autoStopOnMediaEnd) {
       final kind = _companionKind;
       if (!_skipCompanion && kind != CompanionKind.unknown) {

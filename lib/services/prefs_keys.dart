@@ -26,4 +26,5 @@ abstract final class PrefsKeys {
   static const tiktokCookie = 'tiktok_cookie';
   static const ksPullLastMs = 'ks_pull_last_ms';
   static const ksPullCoolUntilMs = 'ks_pull_cool_until_ms';
+  static const danmakuEnabled = 'danmaku_enabled';
 }
