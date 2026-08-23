@@ -433,6 +433,7 @@ class _HomePageState extends _HomePageBase
     }
     if (!await _ensureLicense()) return;
     await _stopDanmaku();
+    _ksDanmakuSession = null;
     setState(() => _busy = true);
     _pullMonitor.reset();
     _endStopRunning = false;
@@ -466,6 +467,7 @@ class _HomePageState extends _HomePageBase
           context,
           room,
           log: _appendLog,
+          onDanmakuSession: _captureKsDanmakuSession,
         );
       } else {
         extracted = await _flvExtractor.extract(room);

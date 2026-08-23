@@ -199,11 +199,21 @@ class KsWebPullPage {
   } catch (e) {}
   var activeIndex = lr.activeIndex || 0;
   var active = items[activeIndex] || null;
+  var principalId = active ? active.principalId : '';
+  var wsInfo = null;
+  try {
+    var wi = lr.websocketInfo;
+    if (wi && wi.url) {
+      wsInfo = { url: String(wi.url), token: String(wi.token || '') };
+    }
+  } catch (e) {}
   return JSON.stringify({
     href: href,
     captcha: captcha,
     activeIndex: activeIndex,
     activeError: active ? active.errorTitle : '',
+    principalId: principalId,
+    wsInfo: wsInfo,
     items: items,
     hooked: hooked,
     perf: perf
@@ -216,6 +226,8 @@ class KsWebPullPage {
     BuildContext context,
     String input, {
     void Function(String msg)? log,
+    void Function(String url, String token, String principalId)?
+        onDanmakuSession,
   }) async {
     void note(String m) => log?.call(m);
 
@@ -284,6 +296,7 @@ class KsWebPullPage {
     var sliderHinted = false;
     var verifyPassedHinted = false;
     var roomOpenedHinted = false;
+    var danmakuSessionSent = false;
     DateTime? verifiedAt;
     DateTime? urlsSeenAt;
     final startedAt = DateTime.now();
@@ -380,6 +393,14 @@ class KsWebPullPage {
           if (parsed == null) {
             await Future.delayed(_probeInterval);
             continue;
+          }
+          if (!danmakuSessionSent && parsed.wsInfo != null) {
+            final url = parsed.wsInfo!['url']?.toString() ?? '';
+            final token = parsed.wsInfo!['token']?.toString() ?? '';
+            if (url.isNotEmpty) {
+              danmakuSessionSent = true;
+              onDanmakuSession?.call(url, token, parsed.principalId);
+            }
           }
           if (hrefIsTargetRoom(parsed.href, rid) && !roomOpenedHinted) {
             roomOpenedHinted = true;
@@ -653,6 +674,8 @@ class KsWebPullPage {
     bool captcha,
     int activeIndex,
     String activeError,
+    String principalId,
+    Map<String, dynamic>? wsInfo,
     List<({String principalId, List<String> urls})> items,
     List<String> hooked,
     List<String> perf,
@@ -699,6 +722,10 @@ class KsWebPullPage {
             ? map['activeIndex'] as int
             : int.tryParse('${map['activeIndex'] ?? 0}') ?? 0,
         activeError: '${map['activeError'] ?? ''}',
+        principalId: '${map['principalId'] ?? ''}',
+        wsInfo: map['wsInfo'] is Map
+            ? Map<String, dynamic>.from(map['wsInfo'] as Map)
+            : null,
         items: items,
         hooked: asUrls(map['hooked']),
         perf: asUrls(map['perf']),

@@ -7,8 +7,18 @@ mixin _DanmakuController on _HomePageBase {
   StreamSubscription<DanmakuMessage>? _danmakuSub;
   String _danmakuStatus = '未连接';
   final List<DanmakuMessage> _recentDanmaku = [];
+  ({String url, String token, String principalId})? _ksDanmakuSession;
 
   static const int _maxRecentDanmaku = 200;
+
+  /// 快手取流 WebView 捕获到弹幕会话（ws url + token + principalId）时回调。
+  void _captureKsDanmakuSession(
+    String url,
+    String token,
+    String principalId,
+  ) {
+    _ksDanmakuSession = (url: url, token: token, principalId: principalId);
+  }
 
   Future<void> _loadDanmakuPrefs() async {
     final sp = await SharedPreferences.getInstance();
@@ -23,12 +33,28 @@ mixin _DanmakuController on _HomePageBase {
       if (mounted) setState(() => _danmakuStatus = '不支持');
       return;
     }
+    if (platform == LivePlatform.kuaishou && _ksDanmakuSession == null) {
+      if (mounted) {
+        setState(() => _danmakuStatus = '未连接');
+        _appendLog('快手弹幕：取流会话未提供弹幕连接信息，请重试拉流');
+      }
+      return;
+    }
     if (mounted) setState(() => _danmakuStatus = '连接中…');
     try {
       await DanmakuBridge.instance.start();
+      final ks = _ksDanmakuSession;
       final client = DanmakuClientFactory.create(
         platform: platform,
         roomId: roomId,
+        options: {
+          if (platform == LivePlatform.kuaishou && ks != null) ...{
+            'wsUrl': ks.url,
+            'token': ks.token,
+            'principalId': ks.principalId,
+          },
+          if (platform == LivePlatform.douyin) 'cookie': '',
+        },
       );
       _danmakuClient = client;
       _danmakuSub = client.messages.listen(_onDanmaku);
@@ -92,7 +118,7 @@ mixin _DanmakuController on _HomePageBase {
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
                     title: const Text('拉流时自动连接弹幕'),
-                    subtitle: const Text('当前只支持 B 站，其它平台后续接入'),
+                    subtitle: const Text('支持 B 站 / 抖音 / 快手'),
                     value: _danmakuEnabled,
                     onChanged: (v) async {
                       setDialogState(() => _danmakuEnabled = v);

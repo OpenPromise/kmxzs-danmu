@@ -1,6 +1,8 @@
 import '../flv_extractor.dart';
 import 'bilibili_danmaku_client.dart';
 import 'danmaku_message.dart';
+import 'douyin_danmaku_client.dart';
+import 'kuaishou_danmaku_client.dart';
 
 /// 弹幕客户端抽象：连接直播间弹幕通道并产出归一化消息流。
 abstract class DanmakuClient {
@@ -28,9 +30,9 @@ class DanmakuClientFactory {
   static bool supports(LivePlatform platform) {
     switch (platform) {
       case LivePlatform.bilibili:
-        return true;
-      case LivePlatform.kuaishou:
       case LivePlatform.douyin:
+      case LivePlatform.kuaishou:
+        return true;
       case LivePlatform.xiaohongshu:
       case LivePlatform.youtube:
       case LivePlatform.tiktok:
@@ -44,12 +46,26 @@ class DanmakuClientFactory {
   static DanmakuClient create({
     required LivePlatform platform,
     required String roomId,
+    Map<String, Object?>? options,
   }) {
     switch (platform) {
       case LivePlatform.bilibili:
         return BilibiliDanmakuClient(roomId: roomId);
-      case LivePlatform.kuaishou:
       case LivePlatform.douyin:
+        return DouyinDanmakuClient(
+          roomId: roomId,
+          cookie: options?['cookie'] as String?,
+        );
+      case LivePlatform.kuaishou:
+        final wsUrl = options?['wsUrl'] as String? ?? '';
+        final token = options?['token'] as String? ?? '';
+        final principalId = options?['principalId'] as String? ?? '';
+        return KuaishouDanmakuClient(
+          roomId: roomId,
+          wsUrl: wsUrl,
+          token: token,
+          principalId: principalId,
+        );
       case LivePlatform.xiaohongshu:
       case LivePlatform.youtube:
       case LivePlatform.tiktok:
