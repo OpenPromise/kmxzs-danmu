@@ -1,19 +1,24 @@
 # ============================================================
-# kmxzs 卡密服务 — Ubuntu 生产环境
+# kmxzs 卡密服务 — Ubuntu 生产环境（阶段0：Caddy 反代 + 自签 HTTPS）
 # 用法：
 #   cp .env.example .env
-#   nano .env          # 必填 KMXZS_API_SECRET
+#   nano .env                     # 必填 KMXZS_API_SECRET，建议填 KMXZS_SERVER_IP
+#   bash scripts/generate-selfsigned-cert.sh <服务器IP>   # 生成自签证书
 #   docker compose up -d --build
+#
+# 对外端口：
+#   HTTP  :18088  老客户端 1.0.x 过渡入口（仅 /config、/files/*、/health）
+#   HTTPS :18443  新客户端 / 管理后台（自签证书，客户端做证书绑定）
 # ============================================================
+
+name: kmxzs-server
 
 services:
   kmxzs-card:
     build: .
     image: kmxzs-card-server:1.3.0
     container_name: kmxzs-card-server
-    ports:
-      # 宿主机端口:容器端口（HTTP，无域名直接用 IP:18088）
-      - "${KMXZS_HOST_PORT:-18088}:18080"
+    # 不直接暴露宿主机端口，统一由 Caddy 反代；容器间用 compose 内部网络
     env_file:
       - .env
     environment:
@@ -22,6 +27,10 @@ services:
       KMXZS_PRODUCTION: "1"
       KMXZS_SEED_DEMO: "0"
       KMXZS_REQUIRE_SIGN: "1"
+      # 在可信反代之后必须开启，防止伪造 IP 绕过限流
+      KMXZS_TRUST_PROXY: ${KMXZS_TRUST_PROXY:-1}
+      # 明文 HTTP 过渡入口只放行 /config、/files/*、/health
+      KMXZS_HTTP_TRANSITION: ${KMXZS_HTTP_TRANSITION:-1}
       # 下列可由 .env 覆盖；未设置时用这里的默认值
       KMXZS_ADMIN_TOKEN: ${KMXZS_ADMIN_TOKEN:-}
       KMXZS_ADMIN_PATH: ${KMXZS_ADMIN_PATH:-/zbpanel}
@@ -37,10 +46,19 @@ services:
       KMXZS_MIN_CLIENT_VERSION: ${KMXZS_MIN_CLIENT_VERSION:-1.0.0}
       KMXZS_FORCE_UPDATE: ${KMXZS_FORCE_UPDATE:-0}
       KMXZS_DOWNLOAD_URL: ${KMXZS_DOWNLOAD_URL:-}
-      KMXZS_TRUST_PROXY: ${KMXZS_TRUST_PROXY:-0}
+      # 阶段1：JWT 认证 / 分销代理
+      KMXZS_SUPERADMIN_USER: ${KMXZS_SUPERADMIN_USER:-superadmin}
+      KMXZS_SUPERADMIN_PASSWORD: ${KMXZS_SUPERADMIN_PASSWORD:-}
+      KMXZS_JWT_SECRET: ${KMXZS_JWT_SECRET:-}
     volumes:
       - kmxzs_card_data:/data
     restart: unless-stopped
+    # 结构化日志轮转：单文件 10MB，保留 5 个，避免宿主磁盘被日志撑满
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test:
         [
@@ -54,5 +72,29 @@ services:
       retries: 3
       start_period: 15s
 
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: kmxzs-caddy
+    depends_on:
+      - kmxzs-card
+    ports:
+      # HTTP 过渡入口（老客户端 1.0.x）
+      - "${KMXZS_HTTP_PORT:-18088}:18088"
+      # HTTPS 入口（新客户端 / 管理后台）
+      - "${KMXZS_HTTPS_PORT:-18443}:18443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      # 管理 SPA 构建产物（admin-web/dist），Caddy 托管在 /panel/*
+      - ../admin-web/dist:/srv/panel:ro
+      - caddy_data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
   kmxzs_card_data:
+  caddy_data:
