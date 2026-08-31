@@ -149,7 +149,7 @@ flutter build windows --release --obfuscate --split-debug-info=build/debug-info 
 
 ## 生产默认行为
 
-- `KMXZS_SEED_DEMO=0`：无演示卡
+- `KMXZS_SEED_DEMO` 默认 `0`：无演示卡；仅开发环境显式设为 `1`
 - `KMXZS_PRODUCTION=1`：弱化 `/health` 信息
 - `KMXZS_REQUIRE_SIGN=1`：强制客户端 HMAC 签名
 - `KMXZS_TRUST_PROXY=1`：信任 Caddy 反代头（限流按真实 IP）

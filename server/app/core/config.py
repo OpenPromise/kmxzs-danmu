@@ -35,7 +35,7 @@ WEAK_API_SECRETS = {
 }
 DEFAULT_MAX_DEVICES = int(os.getenv("KMXZS_MAX_DEVICES", "1"))
 UNBIND_PENALTY_HOURS = int(os.getenv("KMXZS_UNBIND_PENALTY_HOURS", "12"))
-SEED_DEMO = os.getenv("KMXZS_SEED_DEMO", "1") == "1"
+SEED_DEMO = os.getenv("KMXZS_SEED_DEMO", "0") == "1"
 PRODUCTION = os.getenv("KMXZS_PRODUCTION", "0") == "1"
 API_SECRET = (os.getenv("KMXZS_API_SECRET") or "").strip()
 TRUST_PROXY = os.getenv("KMXZS_TRUST_PROXY", "0") == "1"

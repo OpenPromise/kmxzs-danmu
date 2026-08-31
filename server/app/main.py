@@ -1,6 +1,8 @@
 """kmxzs-card-server 组合根：装配 FastAPI、中间件与路由。"""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -29,12 +31,21 @@ from .services.signing import public_key_b64
 
 setup_logging()
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):  # type: ignore[no-untyped-def]
+    """应用生命周期：在开始接收请求前完成安全检查与持久层初始化。"""
+    _initialize_app()
+    yield
+
+
 app = FastAPI(
     title="kmxzs-card-server",
     version=config.SERVER_VERSION,
     docs_url=None if config.PRODUCTION else "/docs",
     redoc_url=None if config.PRODUCTION else "/redoc",
     openapi_url=None if config.PRODUCTION else "/openapi.json",
+    lifespan=lifespan,
 )
 if config.CORS_ORIGINS:
     app.add_middleware(
@@ -98,8 +109,7 @@ async def log_requests(request: Request, call_next):  # type: ignore[no-untyped-
     return await request_logging(request, call_next)
 
 
-@app.on_event("startup")
-def on_startup() -> None:
+def _initialize_app() -> None:
     if config.PRODUCTION:
         if config.SEED_DEMO:
             raise RuntimeError("生产环境禁止 KMXZS_SEED_DEMO=1")
