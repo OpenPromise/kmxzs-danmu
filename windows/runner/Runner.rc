@@ -89,11 +89,11 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "桦中科技" "\0"
+            VALUE "CompanyName", "OpenCopyLive" "\0"
             VALUE "FileDescription", "快马小助手" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "快马小助手" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 桦中科技. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 OpenCopyLive. All rights reserved." "\0"
             VALUE "OriginalFilename", "快马小助手.exe" "\0"
             VALUE "ProductName", "快马小助手" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

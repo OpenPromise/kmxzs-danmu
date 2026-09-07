@@ -45,7 +45,7 @@ class AppConfig {
   );
 
   static const productName = '快马小助手';
-  static const publisher = '桦中科技';
+  static const publisher = 'OpenCopyLive';
   static const supportHint = '如遇登录问题，请联系发卡方处理';
 
   /// 是否向用户开放抖音随机轮播。

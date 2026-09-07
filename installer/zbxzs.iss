@@ -4,7 +4,7 @@
 #endif
 
 #define MyAppName "快马小助手"
-#define MyAppPublisher "桦中科技"
+#define MyAppPublisher "OpenCopyLive"
 #define MyAppExeName "快马小助手.exe"
 #define MySourceDir "..\build\windows\x64\runner\Release"
 
@@ -44,9 +44,9 @@ Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 
 [Messages]
 WelcomeLabel1=欢迎使用 [name]
-WelcomeLabel2=这将安装 [name/ver] 到您的计算机。%n%n开发商：桦中科技%n%n建议在继续之前关闭其他应用程序。
+WelcomeLabel2=这将安装 [name/ver] 到您的计算机。%n%n项目：OpenCopyLive%n%n建议在继续之前关闭其他应用程序。
 FinishedHeadingLabel=完成 [name] 安装向导
-FinishedLabel=已经完成 [name] 的安装。%n%n开发商：桦中科技
+FinishedLabel=已经完成 [name] 的安装。%n%n项目：OpenCopyLive
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加图标:"; Flags: checkedonce
