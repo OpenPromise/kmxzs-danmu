@@ -71,7 +71,7 @@ jobs:
         run: npm run build
 
   client:
-    name: client (flutter analyze)
+    name: client (flutter analyze + test)
     needs: changes
     if: needs.changes.outputs.client == 'true'
     runs-on: ubuntu-latest
@@ -88,3 +88,6 @@ jobs:
       # 让它们不导致失败，但 error 仍是致命（保证新代码不出错）。
       - name: Analyze
         run: flutter analyze --no-fatal-infos --no-fatal-warnings
+      # 纯 Dart/widget 测试不依赖 Windows 平台通道，ubuntu runner 即可跑全量。
+      - name: Test
+        run: flutter test

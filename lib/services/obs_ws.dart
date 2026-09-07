@@ -112,6 +112,37 @@ class ObsWs {
   int _cursorStallTicks = 0;
 
   static const mediaSourceName = '直播拉流';
+  static const danmakuBrowserSourceName = '直播弹幕';
+  static const randomOverlaySourceName = '抖音随机叠加';
+  static const randomOverlayOpacityFilterName = '随机画面透明度';
+  static const _legacyRandomOverlayOpacityFilterName = '随机画面透明度 5%';
+  static const randomOverlayOpacity = 0.0100;
+
+  static int topSceneItemIndex(int itemCount) =>
+      itemCount <= 0 ? 0 : itemCount - 1;
+
+  static double opacitySettingForFilterKind(
+    String filterKind,
+    double opacity,
+  ) =>
+      filterKind == 'color_filter' ? opacity * 100 : opacity;
+
+  static Map<String, dynamic> danmakuBrowserInputSettings(
+    String url, {
+    required int width,
+    required int height,
+  }) =>
+      {
+        'is_local_file': false,
+        'url': url,
+        'width': width,
+        'height': height,
+        'fps_custom': false,
+        'fps': 30,
+        'shutdown': false,
+        'restart_when_active': true,
+        'reroute_audio': false,
+      };
 
   static PullProbeResult probeMediaStatus({
     required ObsMediaState mediaState,
@@ -309,7 +340,99 @@ class ObsWs {
     return last;
   }
 
-  Future<String> _applyPullMediaUrl(String mediaUrl) async {
+  /// 创建/更新独立的抖音随机叠加层，不覆盖主「直播拉流」媒体源。
+  /// 该层始终放在当前场景顶层，并通过颜色校正滤镜固定为 1% 透明度（0.0100）。
+  Future<String> ensureRandomOverlayMediaSource(
+    String mediaUrl, {
+    List<String> fallbacks = const [],
+  }) async {
+    final seen = <String>{};
+    final urls = <String>[];
+    for (final u in [mediaUrl, ...fallbacks]) {
+      final value = u.trim();
+      if (value.isEmpty || !seen.add(value)) continue;
+      urls.add(value);
+    }
+    if (urls.isEmpty) return '无抖音随机叠加地址';
+
+    String last = '';
+    for (var i = 0; i < urls.length; i++) {
+      last = await _applyPullMediaUrl(
+        urls[i],
+        sourceName: randomOverlaySourceName,
+        placeOnTop: true,
+        opacity: randomOverlayOpacity,
+      );
+      final playing = last.contains('playing') ||
+          last.contains('opening') ||
+          last.contains('buffering');
+      if (playing) return last;
+      final dead = last.contains('ended') ||
+          last.contains('error') ||
+          last.contains('stopped');
+      if (dead && i < urls.length - 1) continue;
+      if (!dead) return last;
+    }
+    return last;
+  }
+
+  /// 创建/更新弹幕浏览器源，覆盖整个画布并放在主直播画面上方。
+  Future<String> ensureDanmakuBrowserSource(String overlayUrl) async {
+    final c = _requireClient;
+    final scene = await c.scenes.getCurrentProgramScene().timeout(
+          const Duration(seconds: 8),
+        );
+    var width = 1920;
+    var height = 1080;
+    try {
+      final video =
+          await c.config.getVideoSettings().timeout(const Duration(seconds: 8));
+      width = video.baseWidth ?? width;
+      height = video.baseHeight ?? height;
+    } catch (_) {
+      // 旧版 OBS 读取不到画布时使用 1920x1080。
+    }
+
+    final settings = danmakuBrowserInputSettings(
+      overlayUrl,
+      width: width,
+      height: height,
+    );
+    final inputs = await c.inputs.getInputList(null).timeout(
+          const Duration(seconds: 8),
+        );
+    final exists =
+        inputs.any((input) => input.inputName == danmakuBrowserSourceName);
+    if (exists) {
+      await c.inputs
+          .setInputSettings(
+            inputName: danmakuBrowserSourceName,
+            inputSettings: settings,
+            overlay: false,
+          )
+          .timeout(const Duration(seconds: 8));
+    } else {
+      await c.inputs
+          .createInput(
+            sceneName: scene,
+            inputName: danmakuBrowserSourceName,
+            inputKind: 'browser_source',
+            inputSettings: settings,
+            sceneItemEnabled: true,
+          )
+          .timeout(const Duration(seconds: 8));
+    }
+    await _ensureSourceInSceneAndOnTop(c, scene, danmakuBrowserSourceName);
+    await _moveExistingSourceToTop(c, scene, randomOverlaySourceName);
+    return '已把弹幕浏览器源加入 OBS 顶层';
+  }
+
+  Future<String> _applyPullMediaUrl(
+    String mediaUrl, {
+    String sourceName = mediaSourceName,
+    bool placeOnTop = false,
+    double? opacity,
+  }) async {
     final c = _requireClient;
     final scene = await c.scenes.getCurrentProgramScene().timeout(
           const Duration(seconds: 8),
@@ -340,11 +463,11 @@ class ObsWs {
     final inputs = await c.inputs.getInputList(null).timeout(
           const Duration(seconds: 8),
         );
-    final exists = inputs.any((i) => i.inputName == mediaSourceName);
+    final exists = inputs.any((i) => i.inputName == sourceName);
     if (exists) {
       await c.inputs
           .setInputSettings(
-            inputName: mediaSourceName,
+            inputName: sourceName,
             inputSettings: settings,
             overlay: false, // 完整覆盖设置，避免旧参数残留
           )
@@ -353,7 +476,7 @@ class ObsWs {
       await c.inputs
           .createInput(
             sceneName: scene,
-            inputName: mediaSourceName,
+            inputName: sourceName,
             inputKind: 'ffmpeg_source',
             inputSettings: settings,
             sceneItemEnabled: true,
@@ -361,11 +484,22 @@ class ObsWs {
           .timeout(const Duration(seconds: 8));
     }
 
+    if (placeOnTop) {
+      await _ensureSourceInSceneAndOnTop(c, scene, sourceName);
+    }
+    if (opacity != null) {
+      await _ensureSourceOpacity(c, sourceName, opacity);
+      // 该输入只作为视觉叠加层，避免随机直播音频覆盖主画面声音。
+      await c.inputs
+          .setInputMute(inputName: sourceName, inputMuted: true)
+          .timeout(const Duration(seconds: 8));
+    }
+
     await Future.delayed(const Duration(milliseconds: 800));
     try {
       await c.mediaInputs
           .triggerMediaInputAction(
-            inputName: mediaSourceName,
+            inputName: sourceName,
             mediaAction: ObsMediaInputAction.restart,
           )
           .timeout(const Duration(seconds: 5));
@@ -373,7 +507,7 @@ class ObsWs {
       // restart 不可用时回退到 play；仍失败则交给上层日志
       try {
         await c.mediaInputs.triggerMediaInputAction(
-          inputName: mediaSourceName,
+          inputName: sourceName,
           mediaAction: ObsMediaInputAction.play,
         );
       } catch (_) {
@@ -384,12 +518,121 @@ class ObsWs {
     await Future.delayed(Duration(milliseconds: isHls ? 1800 : 1200));
     try {
       await c.mediaInputs.getMediaInputStatus(
-        inputName: mediaSourceName,
+        inputName: sourceName,
       );
     } catch (_) {
       // 查询失败不影响已经写入的媒体源，只影响日志
     }
+    if (sourceName == randomOverlaySourceName) {
+      return '已把抖音随机画面加入 OBS 顶层（透明度 1% / 0.0100）';
+    }
     return '已把直播画面加入 OBS';
+  }
+
+  Future<void> _ensureSourceInSceneAndOnTop(
+    ObsWebSocket client,
+    String sceneName,
+    String sourceName,
+  ) async {
+    var items = await client.sceneItems
+        .getSceneItemList(sceneName)
+        .timeout(const Duration(seconds: 8));
+    var matching =
+        items.where((item) => item.sourceName == sourceName).toList();
+    int sceneItemId;
+    if (matching.isEmpty) {
+      sceneItemId = await client.sceneItems
+          .createSceneItem(
+            sceneName: sceneName,
+            sourceName: sourceName,
+            sceneItemEnabled: true,
+          )
+          .timeout(const Duration(seconds: 8));
+      items = await client.sceneItems
+          .getSceneItemList(sceneName)
+          .timeout(const Duration(seconds: 8));
+    } else {
+      sceneItemId = matching.first.sceneItemId;
+    }
+    await client.sceneItems
+        .setSceneItemIndex(
+          sceneName: sceneName,
+          sceneItemId: sceneItemId,
+          sceneItemIndex: topSceneItemIndex(items.length),
+        )
+        .timeout(const Duration(seconds: 8));
+  }
+
+  Future<void> _moveExistingSourceToTop(
+    ObsWebSocket client,
+    String sceneName,
+    String sourceName,
+  ) async {
+    final items = await client.sceneItems
+        .getSceneItemList(sceneName)
+        .timeout(const Duration(seconds: 8));
+    final matching =
+        items.where((item) => item.sourceName == sourceName).toList();
+    if (matching.isEmpty) return;
+    await client.sceneItems
+        .setSceneItemIndex(
+          sceneName: sceneName,
+          sceneItemId: matching.first.sceneItemId,
+          sceneItemIndex: topSceneItemIndex(items.length),
+        )
+        .timeout(const Duration(seconds: 8));
+  }
+
+  Future<void> _ensureSourceOpacity(
+    ObsWebSocket client,
+    String sourceName,
+    double opacity,
+  ) async {
+    final filters = await client.filters
+        .getSourceFilterList(sourceName)
+        .timeout(const Duration(seconds: 8));
+    Map<String, dynamic>? current;
+    for (final filter in filters) {
+      if (filter['filterName'] == randomOverlayOpacityFilterName) {
+        current = filter;
+        break;
+      }
+    }
+    if (current == null) {
+      for (final filter in filters) {
+        if (filter['filterName'] == _legacyRandomOverlayOpacityFilterName) {
+          current = filter;
+          await client.filters
+              .setSourceFilterName(
+                sourceName: sourceName,
+                filterName: _legacyRandomOverlayOpacityFilterName,
+                newFilterName: randomOverlayOpacityFilterName,
+              )
+              .timeout(const Duration(seconds: 8));
+          break;
+        }
+      }
+    }
+    if (current == null) {
+      await client.filters.createSourceFilter(
+        sourceName: sourceName,
+        filterName: randomOverlayOpacityFilterName,
+        filterKind: 'color_filter_v2',
+        filterSettings: {'opacity': opacity},
+      ).timeout(const Duration(seconds: 8));
+      return;
+    }
+
+    final kind = '${current['filterKind'] ?? ''}';
+    final value = opacitySettingForFilterKind(kind, opacity);
+    await client.filters
+        .setSourceFilterSettings(
+          sourceName: sourceName,
+          filterName: randomOverlayOpacityFilterName,
+          filterSettings: {'opacity': value},
+          overlay: true,
+        )
+        .timeout(const Duration(seconds: 8));
   }
 
   /// 新一次拉流开始时清掉进度卡住计数。

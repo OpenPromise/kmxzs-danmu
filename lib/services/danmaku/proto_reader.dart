@@ -18,15 +18,20 @@ class PbReader {
 
   /// 读取下一个字段：(字段号, wireType, 值)。
   /// wire 0 → int；wire 2 → Uint8List；wire 1/5 → null（跳过定长字段）。
+  /// wire 3/4 是旧式 protobuf group，递归跳过其内容，避免未知字段
+  /// 让整帧解析失败。抖音 Webcast schema 变化时偶尔会携带这类字段。
   (int, int, Object?) readField() {
     final tag = _readVarint();
     final field = tag >> 3;
     final wire = tag & 0x07;
+    if (field == 0) {
+      throw const FormatException('protobuf 字段号无效');
+    }
     switch (wire) {
       case 0:
         return (field, wire, _readVarint());
       case 1:
-        _pos += 8;
+        _skipBytes(8);
         return (field, wire, null);
       case 2:
         final len = _readVarint();
@@ -37,11 +42,67 @@ class PbReader {
         _pos += len;
         return (field, wire, bytes);
       case 5:
-        _pos += 4;
+        _skipBytes(4);
         return (field, wire, null);
+      case 3:
+        _skipGroup(field);
+        return (field, wire, null);
+      case 4:
+        throw const FormatException('protobuf group 结束标记无匹配开始');
       default:
         throw FormatException('不支持的 protobuf wire type: $wire');
     }
+  }
+
+  /// 跳过一个 start-group 及其嵌套字段。
+  ///
+  /// group 已经是 protobuf 的旧语法，但部分直播协议仍会在未知扩展字段
+  /// 中携带它。这里只跳过，不把 group 内容暴露给上层字段访问器。
+  void _skipGroup(int startField) {
+    while (!isDone) {
+      final tag = _readVarint();
+      final field = tag >> 3;
+      final wire = tag & 0x07;
+      if (field == 0) {
+        throw const FormatException('protobuf group 内字段号无效');
+      }
+      if (wire == 4) {
+        if (field != startField) {
+          throw FormatException(
+            'protobuf group 结束字段不匹配: $field != $startField',
+          );
+        }
+        return;
+      }
+      switch (wire) {
+        case 0:
+          _readVarint();
+          break;
+        case 1:
+          _skipBytes(8);
+          break;
+        case 2:
+          final len = _readVarint();
+          _skipBytes(len);
+          break;
+        case 3:
+          _skipGroup(field);
+          break;
+        case 5:
+          _skipBytes(4);
+          break;
+        default:
+          throw FormatException('不支持的 protobuf group wire type: $wire');
+      }
+    }
+    throw const FormatException('protobuf group 未结束');
+  }
+
+  void _skipBytes(int count) {
+    if (count < 0 || _pos + count > _data.length) {
+      throw const FormatException('protobuf 定长字段越界');
+    }
+    _pos += count;
   }
 
   int _readVarint() {

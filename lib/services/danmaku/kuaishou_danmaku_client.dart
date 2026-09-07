@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'danmaku_client.dart';
 import 'danmaku_message.dart';
@@ -7,7 +8,7 @@ import 'proto_reader.dart';
 
 /// 快手直播弹幕客户端。
 ///
-/// 连接信息（ws url + token + principalId）来自网页 `__INITIAL_STATE__`
+/// 连接信息（ws url + token + liveStreamId）来自网页 `__INITIAL_STATE__`
 /// 的 `liveroom.websocketInfo`，由快手取流 WebView 会话捕获后传入。
 /// 协议：外层 `SocketMessage{payloadType, compressionType, payload}`，
 /// 进房发 CS_ENTER_ROOM(200)，推送 SC_FEED_PUSH(310)，payload 为 protobuf
@@ -17,14 +18,15 @@ class KuaishouDanmakuClient implements DanmakuClient {
     required this.roomId,
     required this.wsUrl,
     required this.token,
-    required this.principalId,
+    required this.liveStreamId,
+    this.enterPacket,
   });
 
   static const _ua =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   // SocketMessage.payloadType
-  static const csPing = 4;
+  static const csHeartbeat = 1;
   static const scPingAck = 104;
   static const scHeartbeatAck = 101;
   static const csEnterRoom = 200;
@@ -42,15 +44,17 @@ class KuaishouDanmakuClient implements DanmakuClient {
 
   final String wsUrl;
   final String token;
-  final String principalId;
+  final String liveStreamId;
+  final List<int>? enterPacket;
 
   final _messages = StreamController<DanmakuMessage>.broadcast();
   WebSocket? _ws;
   Timer? _heartbeat;
   Timer? _reconnectTimer;
+  Completer<void>? _readyCompleter;
   int _reconnectAttempts = 0;
   bool _closed = false;
-  Duration _heartbeatInterval = const Duration(seconds: 15);
+  final Duration _heartbeatInterval = const Duration(seconds: 15);
 
   @override
   String get platform => 'kuaishou';
@@ -62,26 +66,42 @@ class KuaishouDanmakuClient implements DanmakuClient {
   Stream<DanmakuMessage> get messages => _messages.stream;
 
   /// 构造进房包：SocketMessage{payloadType=200, compressionType=1,
-  /// payload=CSWebEnterRoom{payloadType=200, payload{token, liveStreamId}}}。
-  static List<int> buildEnterRoomPacket(String token, String principalId) {
+  /// payload 直接是 CSWebEnterRoom；不能再嵌套一层 SocketMessage。
+  static List<int> buildEnterRoomPacket(
+    String token,
+    String liveStreamId, {
+    String? pageId,
+  }) {
     final payload = PbWriter();
     payload.stringField(1, token);
-    payload.stringField(2, principalId);
-    final enter = PbWriter();
-    enter.varintField(1, csEnterRoom);
-    enter.bytesField(3, payload.takeBytes());
+    payload.stringField(2, liveStreamId);
+    payload.stringField(7, pageId ?? _newPageId());
     final outer = PbWriter();
     outer.varintField(1, csEnterRoom);
     outer.varintField(2, compressionNone);
-    outer.bytesField(3, enter.takeBytes());
+    outer.bytesField(3, payload.takeBytes());
     return outer.takeBytes();
   }
 
-  /// 心跳：SocketMessage{payloadType=CS_PING(4), compressionType=1}。
-  static List<int> buildHeartbeatPacket() {
+  static String _newPageId() {
+    const chars =
+        'bjectSymhasOwnProp-0123456789ABCDEFGHIJKLMNQRTUVWXYZ_dfgiklquvxz';
+    final random = Random.secure();
+    final id = List.generate(16, (_) => chars[random.nextInt(chars.length)]);
+    return '${id.join()}_${DateTime.now().millisecondsSinceEpoch}';
+  }
+
+  /// 网页心跳：SocketMessage{CS_HEARTBEAT, CSWebHeartbeat{timestamp}}。
+  static List<int> buildHeartbeatPacket({int? timestamp}) {
+    final heartbeat = PbWriter();
+    heartbeat.varintField(
+      1,
+      timestamp ?? DateTime.now().millisecondsSinceEpoch,
+    );
     final outer = PbWriter();
-    outer.varintField(1, csPing);
+    outer.varintField(1, csHeartbeat);
     outer.varintField(2, compressionNone);
+    outer.bytesField(3, heartbeat.takeBytes());
     return outer.takeBytes();
   }
 
@@ -147,6 +167,11 @@ class KuaishouDanmakuClient implements DanmakuClient {
     if (wsUrl.isEmpty) {
       throw StateError('快手弹幕缺少 WebSocket 地址（需要先取流拿到会话）');
     }
+    final packet = enterPacket;
+    if ((packet == null || packet.isEmpty) &&
+        (token.isEmpty || liveStreamId.isEmpty)) {
+      throw StateError('快手弹幕缺少 token 或 liveStreamId（请重新取流）');
+    }
     final ws = await WebSocket.connect(
       wsUrl,
       headers: {
@@ -160,45 +185,98 @@ class KuaishouDanmakuClient implements DanmakuClient {
       return;
     }
     _ws = ws;
-    ws.add(buildEnterRoomPacket(token, principalId));
+    final ready = Completer<void>();
+    _readyCompleter = ready;
     ws.listen(
       _onData,
       onDone: _onClosed,
       onError: (Object _) => _onClosed(),
       cancelOnError: true,
     );
+    ws.add(
+      packet != null && packet.isNotEmpty
+          ? packet
+          : buildEnterRoomPacket(token, liveStreamId),
+    );
     _startHeartbeat();
+    try {
+      await ready.future.timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw StateError(
+          '快手弹幕连接后 15 秒内未收到进房确认（会话参数可能已失效）',
+        ),
+      );
+    } finally {
+      if (identical(_readyCompleter, ready)) _readyCompleter = null;
+    }
   }
 
   void _onData(Object? data) {
     if (data is! List<int> || data.isEmpty) return;
-    final outer = PbMessage(data);
-    final type = outer.intValue(1) ?? 0;
-    final compression = outer.intValue(2) ?? compressionNone;
-    final payload = outer.bytes(3);
-    if (payload == null) return;
-    switch (type) {
-      case scFeedPush:
-        for (final msg in parseFeedPayload(
-          payload,
-          compressed: compression == compressionGzip,
-        )) {
-          _messages.add(msg);
+    try {
+      final outer = PbMessage(data);
+      final type = outer.intValue(1) ?? 0;
+      final compression = outer.intValue(2) ?? compressionNone;
+      final payload = outer.bytes(3);
+      if (type == scEnterRoomAck || type == scFeedPush) {
+        final ready = _readyCompleter;
+        if (ready != null && !ready.isCompleted) {
+          _reconnectAttempts = 0;
+          ready.complete();
+          _messages.add(
+            DanmakuMessage(
+              platform: 'kuaishou',
+              user: '',
+              content: '快手弹幕进房成功，已收到业务推送',
+              timestamp: DateTime.now(),
+              kind: DanmakuKind.system,
+            ),
+          );
         }
-        break;
-      case scEnterRoomAck:
-        final ack = PbMessage(payload);
-        final ms = ack.intValue(3) ?? 0;
-        if (ms > 0) _heartbeatInterval = Duration(milliseconds: ms);
-        break;
-      case scPingAck:
-      case scHeartbeatAck:
-        break;
+      }
+      if (payload == null) return;
+      switch (type) {
+        case scFeedPush:
+          for (final msg in parseFeedPayload(
+            payload,
+            compressed: compression == compressionGzip,
+          )) {
+            _messages.add(msg);
+          }
+          break;
+        case scEnterRoomAck:
+          break;
+        case scPingAck:
+        case scHeartbeatAck:
+          break;
+        case 103: // SC_ERROR
+          final ready = _readyCompleter;
+          if (ready != null && !ready.isCompleted) {
+            ready.completeError(StateError('快手弹幕服务拒绝进房'));
+          }
+          break;
+      }
+    } catch (e) {
+      _messages.add(
+        DanmakuMessage(
+          platform: 'kuaishou',
+          user: '',
+          content: '快手弹幕帧解析失败，已跳过: $e',
+          timestamp: DateTime.now(),
+          kind: DanmakuKind.system,
+        ),
+      );
     }
   }
 
   void _startHeartbeat() {
     _heartbeat?.cancel();
+    final ws = _ws;
+    if (ws != null && !_closed) {
+      try {
+        ws.add(buildHeartbeatPacket());
+      } catch (_) {}
+    }
     _heartbeat = Timer.periodic(_heartbeatInterval, (_) {
       final ws = _ws;
       if (ws == null || _closed) return;
@@ -217,6 +295,11 @@ class KuaishouDanmakuClient implements DanmakuClient {
     _stopHeartbeat();
     _ws = null;
     if (_closed) return;
+    final ready = _readyCompleter;
+    if (ready != null && !ready.isCompleted) {
+      ready.completeError(StateError('快手弹幕 WebSocket 在进房确认前断开'));
+      return;
+    }
     if (_reconnectAttempts >= maxReconnectAttempts) {
       _messages.add(
         DanmakuMessage(

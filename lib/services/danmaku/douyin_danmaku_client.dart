@@ -24,6 +24,7 @@ class DouyinDanmakuClient implements DanmakuClient {
     String? cookie,
     Dio? dio,
     DouyinWsSigner? signer,
+    this.parseErrorNoticeInterval = const Duration(seconds: 30),
   })  : _cookie = cookie,
         _dio = dio ??
             Dio(
@@ -40,7 +41,7 @@ class DouyinDanmakuClient implements DanmakuClient {
         _signer = signer ?? DouyinWsSigner();
 
   static const _ua =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36';
 
   static const _aid = '6383';
   static const _versionCode = '180800';
@@ -54,6 +55,9 @@ class DouyinDanmakuClient implements DanmakuClient {
 
   static const maxReconnectAttempts = 5;
 
+  /// 同类坏帧通知的最短间隔，避免协议变化时系统消息和 UI 刷新刷屏。
+  final Duration parseErrorNoticeInterval;
+
   @override
   final String roomId;
 
@@ -65,8 +69,10 @@ class DouyinDanmakuClient implements DanmakuClient {
   WebSocket? _ws;
   Timer? _heartbeat;
   Timer? _reconnectTimer;
+  Completer<void>? _firstFrameCompleter;
   int _reconnectAttempts = 0;
   bool _closed = false;
+  DateTime? _lastParseErrorNoticeAt;
 
   @override
   String get platform => 'douyin';
@@ -132,7 +138,7 @@ class DouyinDanmakuClient implements DanmakuClient {
       headers: {
         'User-Agent': _ua,
         'Origin': 'https://live.douyin.com',
-        'Referer': 'https://live.douyin.com/${prepared.roomId}',
+        'Referer': 'https://live.douyin.com/',
         if (prepared.cookie.isNotEmpty) 'Cookie': prepared.cookie,
       },
     );
@@ -141,6 +147,8 @@ class DouyinDanmakuClient implements DanmakuClient {
       return;
     }
     _ws = ws;
+    final firstFrame = Completer<void>();
+    _firstFrameCompleter = firstFrame;
     ws.listen(
       _onData,
       onDone: _onClosed,
@@ -148,6 +156,18 @@ class DouyinDanmakuClient implements DanmakuClient {
       cancelOnError: true,
     );
     _startHeartbeat(prepared.heartbeatDuration);
+    try {
+      await firstFrame.future.timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw StateError(
+          '抖音弹幕连接仅收到心跳，15 秒内没有收到业务推送（房间参数可能失效）',
+        ),
+      );
+    } finally {
+      if (identical(_firstFrameCompleter, firstFrame)) {
+        _firstFrameCompleter = null;
+      }
+    }
   }
 
   /// 连接前的完整准备：ttwid → 房间解析 → im/fetch。
@@ -178,13 +198,21 @@ class DouyinDanmakuClient implements DanmakuClient {
             },
           ),
         );
-    final c = cookie ?? await _fetchTtwidCookie(d);
+    final suppliedCookie = cookie?.trim() ?? '';
+    final c =
+        suppliedCookie.isEmpty ? await _fetchTtwidCookie(d) : suppliedCookie;
     final room = await _resolveRoom(d, roomId, c);
     final fetch = await _imFetch(d, room.roomId, room.userUniqueId, c);
+    final pushDid = userUniqueIdFromInternalExt(fetch.internalExt);
+    final effectiveUserUniqueId =
+        room.userUniqueId.isNotEmpty ? room.userUniqueId : pushDid;
+    if (effectiveUserUniqueId.isEmpty) {
+      throw const FormatException('抖音弹幕预取响应缺少 user_unique_id');
+    }
     return (
       cookie: c,
       roomId: room.roomId,
-      userUniqueId: room.userUniqueId,
+      userUniqueId: effectiveUserUniqueId,
       cursor: fetch.cursor,
       internalExt: fetch.internalExt,
       heartbeatDuration: fetch.heartbeatDuration,
@@ -224,7 +252,7 @@ class DouyinDanmakuClient implements DanmakuClient {
   }
 
   /// 解析真实房间号与 user_unique_id。
-  /// 长数字直接当 room_id；短号（web_rid）抓直播页 RENDER_DATA 里的
+  /// 16 位以上数字直接当 room_id；短号（web_rid）抓直播页 SSR 状态里的
   /// roomId 与 user_unique_id（主播用户 ID，WS 签名与 URL 都要用）。
   static Future<({String roomId, String userUniqueId})> _resolveRoom(
     Dio dio,
@@ -232,28 +260,106 @@ class DouyinDanmakuClient implements DanmakuClient {
     String cookie,
   ) async {
     final t = roomId.trim();
-    if (RegExp(r'^\d{12,}$').hasMatch(t)) {
+    if (RegExp(r'^\d{16,}$').hasMatch(t)) {
       return (roomId: t, userUniqueId: '');
     }
+    if (t.isEmpty) throw ArgumentError.value(roomId, 'roomId', '房间号不能为空');
     final res = await dio.get(
       'https://live.douyin.com/$t',
       options: Options(
-        headers: {if (cookie.isNotEmpty) 'Cookie': cookie},
+        headers: {
+          'Accept':
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Accept-Encoding': 'identity',
+          'Referer': 'https://live.douyin.com/',
+          if (cookie.isNotEmpty) 'Cookie': cookie,
+        },
         followRedirects: true,
         validateStatus: (_) => true,
       ),
     );
     final html = res.data is String ? res.data as String : '';
-    final m = RegExp(r'roomId\\?"\s*:\s*\\?"(\d{12,})\\?"').firstMatch(html);
-    if (m != null) {
-      final u = RegExp(r'user_unique_id\\?"\s*:\s*\\?"(\d{12,})')
-          .firstMatch(html);
+    for (final candidate in _livePageCandidates(html)) {
+      final realRoomId = _firstDigitsAfterMarkers(
+          candidate,
+          const [
+            '"room":{"id_str":"',
+            '\\"room\\":{\\"id_str\\":\\"',
+            '"room":{"id":',
+            '\\"room\\":{\\"id\\":',
+            'room_id=',
+            'room_id%3D',
+            '"room_id":"',
+            '\\"room_id\\":\\"',
+            '"room_id":',
+            '"room_id_str":"',
+            '\\"room_id_str\\":\\"',
+            '"roomId":"',
+            '\\"roomId\\":\\"',
+            '"roomId":',
+            'gift_effect_bg_',
+          ],
+          minLength: 16);
+      if (realRoomId.isEmpty) continue;
+      final userUniqueId = _firstDigitsAfterMarkers(
+          candidate,
+          const [
+            'user_unique_id=',
+            'user_unique_id%3D',
+            '"user_unique_id":"',
+            '\\"user_unique_id\\":\\"',
+            '"user_unique_id":',
+          ],
+          minLength: 10);
       return (
-        roomId: m.group(1)!,
-        userUniqueId: u?.group(1) ?? '',
+        roomId: realRoomId,
+        userUniqueId: userUniqueId,
       );
     }
     throw StateError('抖音房间 $t 解析不到真实房间号（页面可能被风控）');
+  }
+
+  static List<String> _livePageCandidates(String html) {
+    final out = <String>[html];
+    var decoded = html;
+    for (var i = 0; i < 6; i++) {
+      final next = decoded
+          .replaceAll(r'\\u0026', '&')
+          .replaceAll(r'\u0026', '&')
+          .replaceAll(r'\\\"', '"')
+          .replaceAll(r'\"', '"');
+      if (next == decoded) break;
+      decoded = next;
+      out.add(decoded);
+    }
+    return out;
+  }
+
+  static String _firstDigitsAfterMarkers(
+    String source,
+    List<String> markers, {
+    required int minLength,
+  }) {
+    for (final marker in markers) {
+      var from = 0;
+      while (from < source.length) {
+        final index = source.indexOf(marker, from);
+        if (index < 0) break;
+        var start = index + marker.length;
+        while (start < source.length && ('"\' :'.contains(source[start]))) {
+          start++;
+        }
+        var end = start;
+        while (end < source.length) {
+          final unit = source.codeUnitAt(end);
+          if (unit < 0x30 || unit > 0x39) break;
+          end++;
+        }
+        if (end - start >= minLength) return source.substring(start, end);
+        from = index + marker.length;
+      }
+    }
+    return '';
   }
 
   /// 预取 im/fetch：拿游标、internalExt、心跳间隔和推送服务器。
@@ -270,31 +376,50 @@ class DouyinDanmakuClient implements DanmakuClient {
     String cookie,
   ) async {
     final query = imFetchQuery(realRoomId, userUniqueId);
-    // 与网页一致：GET + a_bogus 签名 + msToken，拿到推送网关认可的 internal_ext
-    List<int> bytes;
+    // 与网页一致：GET + a_bogus 签名 + msToken，拿到推送网关认可的 internal_ext。
+    // 风控页、截断响应或本地签名失效时，改用 POST 再取一次。
     try {
       final ab = DouyinABogus().sign(query, userAgent: _ua);
       final abEncoded = Uri.encodeQueryComponent(ab);
-      bytes = await _fetchProto(
+      final bytes = await _fetchProto(
         dio,
         'https://live.douyin.com/webcast/im/fetch/?$query&a_bogus=$abEncoded',
         cookie: cookie,
       );
+      return _decodeImFetch(bytes);
     } on StateError {
-      // 本地 a_bogus 版本被网关拒绝（空响应）时，回退到 POST 取同样的状态
-      bytes = await _fetchProto(
-        dio,
-        'https://live.douyin.com/webcast/im/fetch/?$query',
-        cookie: cookie,
-        method: 'POST',
-      );
+      // 请求失败转备用 POST。
+    } on FormatException {
+      // 非 protobuf 或被截断的响应转备用 POST。
     }
+
+    final bytes = await _fetchProto(
+      dio,
+      'https://live.douyin.com/webcast/im/fetch/?$query',
+      cookie: cookie,
+      method: 'POST',
+    );
+    return _decodeImFetch(bytes);
+  }
+
+  static ({
+    String cursor,
+    String internalExt,
+    int heartbeatDuration,
+    String pushServer,
+  }) _decodeImFetch(List<int> bytes) {
     final resp = PbMessage(bytes);
+    final cursor = resp.string(2) ?? '';
+    final internalExt = resp.string(5) ?? '';
+    final pushServer = resp.string(10) ?? '';
+    if (cursor.isEmpty && internalExt.isEmpty && pushServer.isEmpty) {
+      throw const FormatException('抖音 im/fetch 响应缺少弹幕连接字段');
+    }
     return (
-      cursor: resp.string(2) ?? '',
-      internalExt: resp.string(5) ?? '',
+      cursor: cursor,
+      internalExt: internalExt,
       heartbeatDuration: (resp.intValue(8) ?? 0),
-      pushServer: resp.string(10) ?? '',
+      pushServer: pushServer,
     );
   }
 
@@ -311,7 +436,7 @@ class DouyinDanmakuClient implements DanmakuClient {
         headers: {
           'Accept': '*/*',
           'Accept-Encoding': 'identity',
-          if (method == 'POST') 'Content-Type': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
           if (cookie.isNotEmpty) 'Cookie': cookie,
         },
         validateStatus: (_) => true,
@@ -327,6 +452,15 @@ class DouyinDanmakuClient implements DanmakuClient {
           : await dio.get<Object?>(url, options: options);
     } on DioException catch (e) {
       throw StateError('抖音 im/fetch 请求失败: ${e.message}');
+    }
+    final status = res.statusCode;
+    if (status == null || status < 200 || status >= 300) {
+      throw StateError('抖音 im/fetch HTTP 异常: $status');
+    }
+    final contentType = (res.headers.value('content-type') ?? '').toLowerCase();
+    if (contentType.contains('text/html') ||
+        contentType.contains('application/json')) {
+      throw StateError('抖音 im/fetch 返回非 protobuf 数据: $contentType');
     }
     final raw = res.data;
     if (raw is! List<int> || raw.isEmpty) {
@@ -453,14 +587,57 @@ class DouyinDanmakuClient implements DanmakuClient {
     return t.replaceAll(RegExp(r'[/\\].*$'), '');
   }
 
+  /// im/fetch 的 internal_ext 会下发本次访客 ID，必须与 WS 参数及签名一致。
+  static String userUniqueIdFromInternalExt(String internalExt) {
+    final match =
+        RegExp(r'(?:^|\|)wss_push_did:([^|]+)').firstMatch(internalExt);
+    return match?.group(1)?.trim() ?? '';
+  }
+
   void _onData(Object? data) {
     if (data is! List<int> || data.isEmpty) return;
-    final inspected = inspectFrame(data);
-    if (inspected.logId != null && inspected.needAck) {
-      _sendAck(inspected.logId!, inspected.internalExt);
-    }
-    for (final msg in inspected.messages) {
-      _messages.add(msg);
+    try {
+      final inspected = inspectFrame(data);
+      if (inspected.logId != null && inspected.needAck) {
+        _sendAck(inspected.logId!, inspected.internalExt);
+      }
+      final firstFrame = _firstFrameCompleter;
+      if (inspected.methods.isNotEmpty &&
+          firstFrame != null &&
+          !firstFrame.isCompleted) {
+        _reconnectAttempts = 0;
+        firstFrame.complete();
+        _messages.add(
+          DanmakuMessage(
+            platform: 'douyin',
+            user: '',
+            content: '弹幕通道已收到业务推送（首批 ${inspected.methods.length} 条）',
+            timestamp: DateTime.now(),
+            kind: DanmakuKind.system,
+          ),
+        );
+      }
+      for (final msg in inspected.messages) {
+        _messages.add(msg);
+      }
+    } catch (e) {
+      // 单个 schema 变化/损坏帧不能终止整条弹幕连接；跳过该帧并继续收包。
+      final now = DateTime.now();
+      final lastNotice = _lastParseErrorNoticeAt;
+      if (lastNotice != null &&
+          now.difference(lastNotice) < parseErrorNoticeInterval) {
+        return;
+      }
+      _lastParseErrorNoticeAt = now;
+      _messages.add(
+        DanmakuMessage(
+          platform: 'douyin',
+          user: '',
+          content: '弹幕帧解析失败，已跳过当前帧: $e',
+          timestamp: now,
+          kind: DanmakuKind.system,
+        ),
+      );
     }
   }
 
@@ -470,6 +647,7 @@ class DouyinDanmakuClient implements DanmakuClient {
     int? logId,
     bool needAck,
     String internalExt,
+    List<String> methods,
     String summary,
   }) inspectFrame(List<int> data) {
     final frame = PbMessage(data);
@@ -483,6 +661,7 @@ class DouyinDanmakuClient implements DanmakuClient {
         logId: logId,
         needAck: false,
         internalExt: '',
+        methods: const [],
         summary: 'frame(payloadType=$payloadType, no payload)',
       );
     }
@@ -497,16 +676,15 @@ class DouyinDanmakuClient implements DanmakuClient {
     final resp = PbMessage(decoded);
     final needAck = resp.intValue(9) == 1;
     final internalExt = resp.string(5) ?? '';
-    final methods = resp
-        .bytesList(1)
-        .map((b) => PbMessage(b).string(1) ?? '?')
-        .toList();
+    final methods =
+        resp.bytesList(1).map((b) => PbMessage(b).string(1) ?? '?').toList();
     final messages = decodeResponse(resp);
     return (
       messages: messages,
       logId: logId,
       needAck: needAck,
       internalExt: internalExt,
+      methods: methods,
       summary:
           'frame(payloadType=$payloadType, ${wasGzip ? 'gzip ' : ''}payload=${payload.length}B, '
           'methods=$methods, chat=${messages.where((m) => m.kind == DanmakuKind.chat).length})',
@@ -605,6 +783,12 @@ class DouyinDanmakuClient implements DanmakuClient {
 
   void _startHeartbeat(int serverIntervalSec) {
     _heartbeat?.cancel();
+    final ws = _ws;
+    if (ws != null && !_closed) {
+      try {
+        ws.add(buildHeartbeatFrame());
+      } catch (_) {}
+    }
     final interval =
         Duration(seconds: serverIntervalSec > 0 ? serverIntervalSec : 30);
     _heartbeat = Timer.periodic(interval, (_) {
@@ -625,6 +809,13 @@ class DouyinDanmakuClient implements DanmakuClient {
     _stopHeartbeat();
     _ws = null;
     if (_closed) return;
+    final firstFrame = _firstFrameCompleter;
+    if (firstFrame != null && !firstFrame.isCompleted) {
+      firstFrame.completeError(
+        StateError('抖音弹幕 WebSocket 在收到首帧前断开'),
+      );
+      return;
+    }
     if (_reconnectAttempts >= maxReconnectAttempts) {
       _messages.add(
         DanmakuMessage(

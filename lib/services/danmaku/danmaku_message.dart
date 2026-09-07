@@ -31,6 +31,11 @@ class DanmakuMessage {
   final String? giftName;
   final int? giftCount;
 
+  /// 抖音和快手目前只展示文字弹幕，礼物消息不进入应用列表或 OBS。
+  bool get hiddenFromDisplay =>
+      kind == DanmakuKind.gift &&
+      (platform == 'douyin' || platform == 'kuaishou');
+
   String get platformLabel {
     switch (platform) {
       case 'bilibili':

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -8,24 +9,28 @@ import 'package:kmxzs/services/danmaku/proto_reader.dart';
 void main() {
   group('快手进房与心跳包', () {
     test('进房包结构正确', () {
-      final packet = KuaishouDanmakuClient.buildEnterRoomPacket('tok123', 'pid456');
+      final packet = KuaishouDanmakuClient.buildEnterRoomPacket(
+        'tok123',
+        'stream456',
+        pageId: 'page_123',
+      );
       final outer = PbMessage(packet);
       expect(outer.intValue(1), 200); // CS_ENTER_ROOM
       expect(outer.intValue(2), 1); // compression NONE
-      final enter = outer.nested(3);
-      expect(enter, isNotNull);
-      expect(enter!.intValue(1), 200);
-      final payload = enter.nested(3);
+      final payload = outer.nested(3);
       expect(payload, isNotNull);
       expect(payload!.string(1), 'tok123');
-      expect(payload.string(2), 'pid456');
+      expect(payload.string(2), 'stream456');
+      expect(payload.string(7), 'page_123');
     });
 
-    test('心跳包为 CS_PING(4)', () {
-      final packet = KuaishouDanmakuClient.buildHeartbeatPacket();
+    test('心跳包为 CS_HEARTBEAT(1) 并携带时间戳', () {
+      final packet =
+          KuaishouDanmakuClient.buildHeartbeatPacket(timestamp: 123456789);
       final outer = PbMessage(packet);
-      expect(outer.intValue(1), 4);
+      expect(outer.intValue(1), 1);
       expect(outer.intValue(2), 1);
+      expect(outer.nested(3)?.intValue(1), 123456789);
     });
   });
 
@@ -95,5 +100,41 @@ void main() {
       final msgs = KuaishouDanmakuClient.parseFeedPayload(feed.takeBytes());
       expect(msgs, isEmpty);
     });
+  });
+
+  test('真实 WebSocket 流程会发送进房包并等待服务端确认', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final received = Completer<List<int>>();
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      socket.listen((data) {
+        if (data is! List<int>) return;
+        final outer = PbMessage(data);
+        if (outer.intValue(1) != KuaishouDanmakuClient.csEnterRoom) return;
+        if (!received.isCompleted) received.complete(data);
+        final ack = PbWriter()
+          ..varintField(1, KuaishouDanmakuClient.scEnterRoomAck)
+          ..varintField(2, KuaishouDanmakuClient.compressionNone)
+          ..bytesField(3, const [0x08, 0x01]);
+        socket.add(ack.takeBytes());
+      });
+    });
+    final client = KuaishouDanmakuClient(
+      roomId: '3x-test',
+      wsUrl: 'ws://127.0.0.1:${server.port}',
+      token: 'token-test',
+      liveStreamId: 'stream-test',
+    );
+    try {
+      await client.connect();
+      final packet = PbMessage(await received.future);
+      final enter = packet.nested(3)!;
+      expect(enter.string(1), 'token-test');
+      expect(enter.string(2), 'stream-test');
+      expect(enter.string(7), isNotEmpty);
+    } finally {
+      await client.dispose();
+      await server.close(force: true);
+    }
   });
 }

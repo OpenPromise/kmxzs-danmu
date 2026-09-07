@@ -7,17 +7,33 @@ mixin _DanmakuController on _HomePageBase {
   StreamSubscription<DanmakuMessage>? _danmakuSub;
   String _danmakuStatus = '未连接';
   final List<DanmakuMessage> _recentDanmaku = [];
-  ({String url, String token, String principalId})? _ksDanmakuSession;
+  ({
+    String url,
+    String token,
+    String liveStreamId,
+    List<int>? enterPacket,
+  })? _ksDanmakuSession;
 
   static const int _maxRecentDanmaku = 200;
 
-  /// 快手取流 WebView 捕获到弹幕会话（ws url + token + principalId）时回调。
+  /// 快手取流 WebView 捕获到弹幕会话（地址、token、liveStreamId/进房包）时回调。
   void _captureKsDanmakuSession(
     String url,
     String token,
-    String principalId,
+    String liveStreamId,
+    List<int>? enterPacket,
   ) {
-    _ksDanmakuSession = (url: url, token: token, principalId: principalId);
+    _ksDanmakuSession = (
+      url: url,
+      token: token,
+      liveStreamId: liveStreamId,
+      enterPacket: enterPacket,
+    );
+    _appendLog(
+      enterPacket != null
+          ? '已捕获快手弹幕会话（网页进房包）'
+          : '已获取快手弹幕会话（直播流 ${liveStreamId.isEmpty ? '未知' : liveStreamId}）',
+    );
   }
 
   Future<void> _loadDanmakuPrefs() async {
@@ -51,7 +67,8 @@ mixin _DanmakuController on _HomePageBase {
           if (platform == LivePlatform.kuaishou && ks != null) ...{
             'wsUrl': ks.url,
             'token': ks.token,
-            'principalId': ks.principalId,
+            'liveStreamId': ks.liveStreamId,
+            'enterPacket': ks.enterPacket,
           },
           if (platform == LivePlatform.douyin) 'cookie': '',
         },
@@ -75,6 +92,7 @@ mixin _DanmakuController on _HomePageBase {
   }
 
   void _onDanmaku(DanmakuMessage msg) {
+    if (msg.hiddenFromDisplay) return;
     if (mounted) {
       setState(() {
         _recentDanmaku.insert(0, msg);
@@ -83,10 +101,12 @@ mixin _DanmakuController on _HomePageBase {
         }
       });
     }
-    // 系统提示不进 OBS 叠层，避免刷屏干扰画面
-    if (msg.kind != DanmakuKind.system) {
-      DanmakuBridge.instance.publish(msg);
+    // 系统提示写入主日志但不进 OBS 叠层，便于定位“只有心跳”等连接问题。
+    if (msg.kind == DanmakuKind.system) {
+      _appendLog('弹幕: ${msg.content}');
+      return;
     }
+    DanmakuBridge.instance.publish(msg);
   }
 
   Future<void> _stopDanmaku({String status = '未连接'}) async {

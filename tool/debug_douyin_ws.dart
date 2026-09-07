@@ -11,10 +11,16 @@ import 'package:kmxzs/services/danmaku/proto_reader.dart';
 Future<void> main(List<String> args) async {
   var room = '1415534312';
   String? cookieOverride;
+  var printAllFrames = false;
+  var listenSeconds = 180;
   for (var i = 0; i < args.length; i++) {
     if (args[i] == '--cookie' && i + 1 < args.length) {
       cookieOverride = args[i + 1];
       i++;
+    } else if (args[i] == '--all') {
+      printAllFrames = true;
+    } else if (args[i] == '--seconds' && i + 1 < args.length) {
+      listenSeconds = int.tryParse(args[++i]) ?? listenSeconds;
     } else {
       room = args[i];
     }
@@ -23,18 +29,20 @@ Future<void> main(List<String> args) async {
     roomId: room,
     cookie: cookieOverride,
   );
-  final stub = DouyinDanmakuClient.xmsStub(prepared.roomId, prepared.userUniqueId);
+  final stub =
+      DouyinDanmakuClient.xmsStub(prepared.roomId, prepared.userUniqueId);
   final signature = DouyinWsSigner().sign(stub);
   final host = DouyinDanmakuClient.pushHost(prepared.pushServer);
   final url = 'wss://$host/webcast/im/push/v2/?'
       '${DouyinDanmakuClient.buildWsQuery(
-        room: prepared.roomId,
-        userUniqueId: prepared.userUniqueId,
-        cursor: prepared.cursor,
-        internalExt: prepared.internalExt,
-        signature: signature,
-      )}';
-  print('room=${prepared.roomId} userUniqueId=${prepared.userUniqueId} host=$host');
+    room: prepared.roomId,
+    userUniqueId: prepared.userUniqueId,
+    cursor: prepared.cursor,
+    internalExt: prepared.internalExt,
+    signature: signature,
+  )}';
+  print(
+      'room=${prepared.roomId} userUniqueId=${prepared.userUniqueId} host=$host');
   print('cursor=${prepared.cursor}');
   print('heartbeatDuration=${prepared.heartbeatDuration}');
   print('internalExt=${prepared.internalExt}');
@@ -45,13 +53,13 @@ Future<void> main(List<String> args) async {
     url,
     headers: {
       'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36',
       'Origin': 'https://live.douyin.com',
-      'Referer': 'https://live.douyin.com/${prepared.roomId}',
+      'Referer': 'https://live.douyin.com/',
       'Cookie': cookieOverride ?? prepared.cookie,
     },
   );
-  print('ws connected, listening 20s...');
+  print('ws connected, listening ${listenSeconds}s...');
   // 与浏览器一致：连上立刻发一次心跳
   ws.add(DouyinDanmakuClient.buildHeartbeatFrame());
   final heartbeat = Timer.periodic(const Duration(seconds: 20), (_) {
@@ -68,7 +76,7 @@ Future<void> main(List<String> args) async {
     if (r.summary.contains('WebcastChatMessage')) {
       dumpChatFrame(data);
     }
-    if (r.messages.isNotEmpty || frameCount % 30 == 0) {
+    if (printAllFrames || r.messages.isNotEmpty || frameCount % 30 == 0) {
       print('[frame $frameCount] ${r.summary}');
     }
     for (final m in r.messages) {
@@ -88,7 +96,7 @@ Future<void> main(List<String> args) async {
   }, onError: (Object e) {
     print('ws error: $e');
   });
-  await Future.delayed(const Duration(seconds: 180));
+  await Future.delayed(Duration(seconds: listenSeconds));
   heartbeat.cancel();
   print('total frames=$frameCount methods=$methodCounts');
   await ws.close();

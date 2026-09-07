@@ -59,12 +59,14 @@ class DanmakuClientFactory {
       case LivePlatform.kuaishou:
         final wsUrl = options?['wsUrl'] as String? ?? '';
         final token = options?['token'] as String? ?? '';
-        final principalId = options?['principalId'] as String? ?? '';
+        final liveStreamId = options?['liveStreamId'] as String? ?? '';
+        final enterPacket = options?['enterPacket'] as List<int>?;
         return KuaishouDanmakuClient(
           roomId: roomId,
           wsUrl: wsUrl,
           token: token,
-          principalId: principalId,
+          liveStreamId: liveStreamId,
+          enterPacket: enterPacket,
         );
       case LivePlatform.xiaohongshu:
       case LivePlatform.youtube:

@@ -1,22 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:desktop_webview_window/desktop_webview_window.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:kmxzs/pages/ks_web_login_page.dart';
 import 'package:kmxzs/services/flv_extractor.dart';
 import 'package:kmxzs/services/prefs_keys.dart';
 import 'package:kmxzs/services/webview2_runtime.dart';
 import 'package:kmxzs/services/win_hotkey.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 用独立于登录的 WebView2 会话打开快手房间页取流。
 ///
-/// 登录目录会被按设备身份打分；拉流用另一份目录，平时复用，
-/// 确认「请求过快」后才换新。不改 UA、不额外打 livedetail。
+/// 登录与拉流共用同一份持久 WebView2 配置目录，确保 Cookie、设备身份
+/// 和快手弹幕 token 属于同一会话。不改 UA、不额外打 livedetail。
 ///
 /// 实测 `https://live.kuaishou.com/u/{rid}` 的数据结构：
 /// `window.__INITIAL_STATE__.liveroom.playList` 是数组，
@@ -30,7 +27,7 @@ class KsWebPullPage {
   static const _probeInterval = Duration(milliseconds: 2500);
   static const _urlSettle = Duration(milliseconds: 1500);
   static const minPullInterval = Duration(seconds: 45);
-  static const rateLimitCooldown = Duration(minutes: 3);
+  static const rateLimitCooldown = Duration(minutes: 5);
 
   static DateTime? _lastPullAt;
   static DateTime? _coolUntil;
@@ -42,6 +39,53 @@ class KsWebPullPage {
   window.__kmxzsHooked = true;
   window.__kmxzsByPrincipal = {};
   window.__kmxzsPerf = [];
+  window.__kmxzsWsCapture = { url: '', enterPacket: '' };
+  window.__kmxzsWsMeta = { url: '', token: '', liveStreamId: '' };
+  function bytesToBase64(bytes) {
+    var binary = '';
+    for (var i = 0; i < bytes.length; i += 8192) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    return btoa(binary);
+  }
+  function captureWsSend(url, data) {
+    function keepPacket(bytes) {
+      // SocketMessage.payloadType=CS_ENTER_ROOM(200) 的 varint 前缀。
+      if (bytes && bytes.length > 3 && bytes[0] === 8 &&
+          bytes[1] === 200 && bytes[2] === 1) {
+        window.__kmxzsWsCapture.url = String(url || '');
+        window.__kmxzsWsCapture.enterPacket = bytesToBase64(bytes);
+      }
+    }
+    try {
+      if (data instanceof ArrayBuffer) {
+        keepPacket(new Uint8Array(data));
+      } else if (ArrayBuffer.isView(data)) {
+        keepPacket(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+      } else if (data instanceof Blob) {
+        data.arrayBuffer().then(function (b) {
+          keepPacket(new Uint8Array(b));
+        }).catch(function () {});
+      }
+    } catch (e) {}
+  }
+  var OriginalWebSocket = window.WebSocket;
+  if (typeof OriginalWebSocket === 'function') {
+    var HookedWebSocket = function (url, protocols) {
+      var ws = protocols === undefined
+        ? new OriginalWebSocket(url)
+        : new OriginalWebSocket(url, protocols);
+      var rawSend = ws.send;
+      ws.send = function (data) {
+        captureWsSend(url, data);
+        return rawSend.call(this, data);
+      };
+      return ws;
+    };
+    HookedWebSocket.prototype = OriginalWebSocket.prototype;
+    Object.setPrototypeOf(HookedWebSocket, OriginalWebSocket);
+    window.WebSocket = HookedWebSocket;
+  }
   function keep(pid, u) {
     if (!u) return;
     var s = String(u);
@@ -68,8 +112,34 @@ class KsWebPullPage {
       keep(pid, r.backupUrl);
     }
   }
+  function scanWsMeta(value, depth) {
+    if (!value || typeof value !== 'object' || depth > 7) return;
+    try {
+      var urls = value.webSocketUrls || value.websocketUrls || [];
+      var url = value.url || (Array.isArray(urls) ? urls[0] : '');
+      var token = value.token || '';
+      if (url && token && /websocket|live.*ws/i.test(String(url))) {
+        window.__kmxzsWsMeta.url = String(url);
+        window.__kmxzsWsMeta.token = String(token);
+      }
+      if (value.liveStreamId) {
+        window.__kmxzsWsMeta.liveStreamId = String(value.liveStreamId);
+      }
+      if (Array.isArray(value)) {
+        for (var i = 0; i < Math.min(value.length, 50); i++) {
+          scanWsMeta(value[i], depth + 1);
+        }
+      } else {
+        var keys = Object.keys(value);
+        for (var j = 0; j < Math.min(keys.length, 80); j++) {
+          scanWsMeta(value[keys[j]], depth + 1);
+        }
+      }
+    } catch (e) {}
+  }
   function ingest(json) {
     if (!json || typeof json !== 'object') return;
+    scanWsMeta(json, 0);
     var data = json.data || json;
     var detail = data.liveDetail || data;
     var ls = detail.liveStream || data.liveStream;
@@ -141,8 +211,18 @@ class KsWebPullPage {
     var err = item.errorType || {};
     var urls = [];
     pushH264(ls, urls);
+    var streamId = String(ls.liveStreamId || ls.id || item.liveStreamId || '');
+    if (!streamId) {
+      for (var u = 0; u < urls.length; u++) {
+        var match = String(urls[u]).match(
+          /[/]gifshow[/]([A-Za-z0-9_-]+?)_(?:Game|SD|HD|UHD|Origin)[A-Za-z0-9_-]*[.](?:flv|m3u8)/i
+        );
+        if (match) { streamId = match[1]; break; }
+      }
+    }
     return {
       principalId: String(author.id || author.principalId || ls.principalId || ''),
+      liveStreamId: streamId,
       urls: urls,
       errorTitle: String(err.title || ''),
       isLiving: item.isLiving === true || ls.living === true
@@ -200,11 +280,27 @@ class KsWebPullPage {
   var activeIndex = lr.activeIndex || 0;
   var active = items[activeIndex] || null;
   var principalId = active ? active.principalId : '';
+  var liveStreamId = active ? active.liveStreamId : '';
+  if (!liveStreamId && lr.liveStream) {
+    liveStreamId = String(lr.liveStream.liveStreamId || lr.liveStream.id || '');
+  }
   var wsInfo = null;
   try {
-    var wi = lr.websocketInfo;
-    if (wi && wi.url) {
-      wsInfo = { url: String(wi.url), token: String(wi.token || '') };
+    var wi = lr.websocketInfo || {};
+    var capture = window.__kmxzsWsCapture || {};
+    var meta = window.__kmxzsWsMeta || {};
+    var urls = wi.webSocketUrls || wi.websocketUrls || [];
+    var wsUrl = String(capture.url || wi.url || (urls[0] || '') || meta.url || '');
+    var packet = String(capture.enterPacket || '');
+    var token = String(wi.token || meta.token || '');
+    liveStreamId = String(wi.liveStreamId || liveStreamId || meta.liveStreamId || '');
+    if (wsUrl && (packet || (token && liveStreamId))) {
+      wsInfo = {
+        url: wsUrl,
+        token: token,
+        liveStreamId: liveStreamId,
+        enterPacket: packet
+      };
     }
   } catch (e) {}
   return JSON.stringify({
@@ -213,6 +309,7 @@ class KsWebPullPage {
     activeIndex: activeIndex,
     activeError: active ? active.errorTitle : '',
     principalId: principalId,
+    liveStreamId: liveStreamId,
     wsInfo: wsInfo,
     items: items,
     hooked: hooked,
@@ -222,12 +319,118 @@ class KsWebPullPage {
 ''';
   }
 
+  static String _webSocketInfoJs(String liveStreamId) {
+    final encoded = jsonEncode(liveStreamId);
+    return '''
+(function () {
+  var liveStreamId = $encoded;
+  var state = window.__kmxzsWsInfoFetch;
+  if (!state || state.liveStreamId !== liveStreamId) {
+    state = {
+      liveStreamId: liveStreamId,
+      done: false,
+      status: 0,
+      url: '',
+      token: '',
+      error: '',
+      diagnostic: ''
+    };
+    window.__kmxzsWsInfoFetch = state;
+    function hasSession() {
+      return !!state.url && !!state.token;
+    }
+    function scan(value, depth) {
+      if (value == null || depth > 7) return;
+      if (typeof value === 'string') {
+        if (!state.url && /^wss?:/i.test(value)) state.url = value;
+        return;
+      }
+      if (typeof value !== 'object') return;
+      if (!state.token && typeof value.token === 'string') {
+        state.token = value.token;
+      }
+      var candidates = [value.url, value.wsUrl];
+      var lists = [value.websocketUrls, value.webSocketUrls, value.wsUrls];
+      for (var i = 0; i < lists.length; i++) {
+        if (Array.isArray(lists[i])) candidates = candidates.concat(lists[i]);
+      }
+      for (var j = 0; j < candidates.length; j++) {
+        var candidate = candidates[j];
+        if (candidate && typeof candidate === 'object') {
+          candidate = candidate.url || candidate.wsUrl || '';
+        }
+        if (!state.url && /^wss?:/i.test(String(candidate || ''))) {
+          state.url = String(candidate);
+        }
+      }
+      var keys = Object.keys(value);
+      for (var k = 0; k < Math.min(keys.length, 80); k++) {
+        scan(value[keys[k]], depth + 1);
+      }
+    }
+    function describe(json, label) {
+      var root = json && typeof json === 'object' ? json : {};
+      var data = root.data && typeof root.data === 'object' ? root.data : {};
+      var code = root.result;
+      if (code == null) code = root.code;
+      if (code == null) code = data.result;
+      if (code == null) code = data.code;
+      var message = root.error_msg || root.errorMessage || root.message ||
+        data.error_msg || data.errorMessage || data.message || '';
+      state.diagnostic = label + ':code=' + String(code == null ? '-' : code) +
+        ',keys=' + Object.keys(root).slice(0, 12).join('|') +
+        ',data=' + Object.keys(data).slice(0, 12).join('|') +
+        (message ? ',msg=' + String(message).slice(0, 60) : '');
+    }
+    function requestJson(url, options, label) {
+      return fetch(url, options).then(function (response) {
+        state.status = response.status;
+        return response.json();
+      }).then(function (json) {
+        scan(json, 0);
+        describe(json, label);
+        return hasSession();
+      }).catch(function (e) {
+        state.diagnostic = label + ':error=' + String(e).slice(0, 80);
+        return false;
+      });
+    }
+    var endpoint = '/live_api/liveroom/websocketinfo?liveStreamId=' +
+      encodeURIComponent(liveStreamId);
+    var getOptions = {
+      method: 'GET',
+      credentials: 'include',
+      headers: { 'Accept': 'application/json, text/plain, */*' }
+    };
+    requestJson(endpoint, getOptions, 'rest').then(function () {
+      state.done = true;
+    }).catch(function (e) {
+      state.error = String(e);
+      state.done = true;
+    });
+  }
+  return JSON.stringify({
+    done: state.done === true,
+    status: Number(state.status || 0),
+    url: String(state.url || ''),
+    token: String(state.token || ''),
+    error: String(state.error || ''),
+    diagnostic: String(state.diagnostic || '')
+  });
+})()
+''';
+  }
+
   static Future<FlvExtractResult> open(
     BuildContext context,
     String input, {
     void Function(String msg)? log,
-    void Function(String url, String token, String principalId)?
-        onDanmakuSession,
+    void Function(
+      String url,
+      String token,
+      String liveStreamId,
+      List<int>? enterPacket,
+    )? onDanmakuSession,
   }) async {
     void note(String m) => log?.call(m);
 
@@ -266,9 +469,9 @@ class KsWebPullPage {
       );
     }
     await _markPullAttempt();
-    note('正在打开房间 $rid（拉流会话与登录分开，不改浏览器标识）');
+    note('正在打开房间 $rid（使用已登录的快手会话）');
 
-    final profile = await _pullProfilePath();
+    final profile = await KsWebLoginPage.profilePath();
     late final Webview webview;
     try {
       webview = await WebviewWindow.create(
@@ -291,14 +494,16 @@ class KsWebPullPage {
 
     final completer = Completer<FlvExtractResult>();
     var settled = false;
-    var rotateProfile = false;
     BuildContext? tipCtx;
     var sliderHinted = false;
     var verifyPassedHinted = false;
     var roomOpenedHinted = false;
     var danmakuSessionSent = false;
+    var wsInfoProbeCount = 0;
+    DateTime? lastWsInfoFetchAt;
     DateTime? verifiedAt;
     DateTime? urlsSeenAt;
+    DateTime? danmakuWaitStartedAt;
     final startedAt = DateTime.now();
 
     Future<void> raisePullWindow() async {
@@ -328,10 +533,8 @@ class KsWebPullPage {
       } catch (e) {
         debugPrint('[ks-pull] close: $e');
       }
-      if (rateLimited || rotateProfile) {
-        rotateProfile = true;
+      if (rateLimited) {
         unawaited(_markRateLimited());
-        _wipeProfileLater(profile);
       }
       if (!completer.isCompleted) completer.complete(result);
     }
@@ -397,9 +600,24 @@ class KsWebPullPage {
           if (!danmakuSessionSent && parsed.wsInfo != null) {
             final url = parsed.wsInfo!['url']?.toString() ?? '';
             final token = parsed.wsInfo!['token']?.toString() ?? '';
+            final liveStreamId =
+                parsed.wsInfo!['liveStreamId']?.toString() ?? '';
+            final packetBase64 =
+                parsed.wsInfo!['enterPacket']?.toString() ?? '';
+            List<int>? enterPacket;
+            if (packetBase64.isNotEmpty) {
+              try {
+                enterPacket = base64Decode(packetBase64);
+              } catch (_) {}
+            }
             if (url.isNotEmpty) {
               danmakuSessionSent = true;
-              onDanmakuSession?.call(url, token, parsed.principalId);
+              onDanmakuSession?.call(
+                url,
+                token,
+                liveStreamId,
+                enterPacket,
+              );
             }
           }
           if (hrefIsTargetRoom(parsed.href, rid) && !roomOpenedHinted) {
@@ -423,6 +641,93 @@ class KsWebPullPage {
                 note: '来源: WebView playList 当前房间',
               );
               if (packed.ok) {
+                if (onDanmakuSession != null && !danmakuSessionSent) {
+                  danmakuWaitStartedAt ??= DateTime.now();
+                  var liveStreamId = parsed.liveStreamId;
+                  if (liveStreamId.isEmpty) {
+                    for (final url in packed.allUrls) {
+                      liveStreamId = liveStreamIdFromUrl(url);
+                      if (liveStreamId.isNotEmpty) break;
+                    }
+                  }
+                  final now = DateTime.now();
+                  final waitedForNative = now.difference(danmakuWaitStartedAt!);
+                  if (wsInfoProbeCount == 0 &&
+                      waitedForNative < const Duration(seconds: 8)) {
+                    if (waitedForNative < _probeInterval) {
+                      note('直播地址已就绪，正在等待快手网页建立弹幕会话');
+                    }
+                    await Future.delayed(_probeInterval);
+                    continue;
+                  }
+                  final canFetchWsInfo = liveStreamId.isNotEmpty &&
+                      wsInfoProbeCount < 4 &&
+                      (lastWsInfoFetchAt == null ||
+                          now.difference(lastWsInfoFetchAt!) >=
+                              const Duration(seconds: 2));
+                  if (canFetchWsInfo) {
+                    wsInfoProbeCount++;
+                    lastWsInfoFetchAt = now;
+                    if (wsInfoProbeCount == 1) {
+                      note('网页未主动连接弹幕，正在进行一次登录会话兜底请求（直播流 $liveStreamId）');
+                    }
+                    try {
+                      final rawWsInfo = await webview
+                          .evaluateJavaScript(
+                            _webSocketInfoJs(liveStreamId),
+                          )
+                          .timeout(const Duration(seconds: 8));
+                      final fetched = parseWebSocketInfoProbe(rawWsInfo);
+                      if (fetched != null &&
+                          fetched.url.isNotEmpty &&
+                          fetched.token.isNotEmpty) {
+                        danmakuSessionSent = true;
+                        note('已获取快手弹幕会话');
+                        onDanmakuSession(
+                          fetched.url,
+                          fetched.token,
+                          liveStreamId,
+                          null,
+                        );
+                      } else if (fetched?.done == true) {
+                        wsInfoProbeCount = 4;
+                        final status = fetched?.status ?? 0;
+                        var detail = fetched?.diagnostic.trim() ?? '';
+                        detail = detail.replaceAll(RegExp(r'[\r\n]+'), ' ');
+                        if (detail.length > 160) {
+                          detail = detail.substring(0, 160);
+                        }
+                        if (detail.contains('code=400010')) {
+                          unawaited(_markRateLimited());
+                        }
+                        final suffix = detail.isEmpty ? '' : '，$detail';
+                        note(
+                          status > 0
+                              ? '快手弹幕连接信息请求失败（HTTP $status$suffix）'
+                              : '快手弹幕连接信息请求未返回有效会话$suffix',
+                        );
+                      }
+                    } catch (e) {
+                      debugPrint('[ks-pull] websocketinfo: $e');
+                      if (wsInfoProbeCount >= 4) {
+                        note('快手弹幕连接信息请求超时');
+                      }
+                    }
+                  }
+                  if (danmakuSessionSent) {
+                    note(
+                      '浏览器取流成功，房间 $rid，当前场 ${packed.allUrls.length} 条',
+                    );
+                    finish(packed);
+                    return;
+                  }
+                  if (DateTime.now().difference(danmakuWaitStartedAt!) <
+                      const Duration(seconds: 20)) {
+                    await Future.delayed(_probeInterval);
+                    continue;
+                  }
+                  note('未捕获到快手弹幕会话，继续拉流但弹幕将不可用');
+                }
                 note(
                   '浏览器取流成功，房间 $rid，当前场 ${packed.allUrls.length} 条',
                 );
@@ -506,37 +811,6 @@ class KsWebPullPage {
     return completer.future;
   }
 
-  /// 拉流专用目录，与登录的 webview_ks_native 分开。
-  static Future<String> _pullProfilePath() async {
-    unawaited(_sweepTempIncognito());
-    final dir = await getApplicationSupportDirectory();
-    final path = p.join(dir.path, 'webview_ks_pull');
-    await Directory(path).create(recursive: true);
-    return path;
-  }
-
-  static Future<void> _sweepTempIncognito() async {
-    try {
-      final root = await getTemporaryDirectory();
-      final old = Directory(p.join(root.path, 'kmxzs_ks_incognito'));
-      if (await old.exists()) await old.delete(recursive: true);
-    } catch (_) {}
-  }
-
-  static void _wipeProfileLater(String path) {
-    unawaited(() async {
-      for (var i = 0; i < 8; i++) {
-        await Future<void>.delayed(Duration(seconds: i == 0 ? 2 : 1));
-        try {
-          final d = Directory(path);
-          if (!await d.exists()) return;
-          await d.delete(recursive: true);
-          return;
-        } catch (_) {}
-      }
-    }());
-  }
-
   @visibleForTesting
   static void resetPullPacingForTest() {
     _lastPullAt = null;
@@ -584,7 +858,8 @@ class KsWebPullPage {
     _lastPullAt = DateTime.now();
     try {
       final sp = await SharedPreferences.getInstance();
-      await sp.setInt(PrefsKeys.ksPullLastMs, _lastPullAt!.millisecondsSinceEpoch);
+      await sp.setInt(
+          PrefsKeys.ksPullLastMs, _lastPullAt!.millisecondsSinceEpoch);
     } catch (e) {
       debugPrint('[ks-pull] save last pull: $e');
     }
@@ -669,12 +944,74 @@ class KsWebPullPage {
     return false;
   }
 
+  static String liveStreamIdFromUrl(String raw) {
+    final value = raw.trim();
+    if (value.isEmpty) return '';
+    try {
+      final uri = Uri.parse(value);
+      for (final entry in uri.queryParameters.entries) {
+        if (entry.key.toLowerCase() == 'livestreamid' &&
+            entry.value.trim().isNotEmpty) {
+          return entry.value.trim();
+        }
+      }
+    } catch (_) {}
+    final match = RegExp(
+      r'/gifshow/([A-Za-z0-9_-]+?)_(?:Game|SD|HD|UHD|Origin)[A-Za-z0-9_-]*\.(?:flv|m3u8)',
+      caseSensitive: false,
+    ).firstMatch(value);
+    return match?.group(1) ?? '';
+  }
+
+  static ({
+    String url,
+    String token,
+    int status,
+    bool done,
+    String diagnostic,
+  })? parseWebSocketInfoProbe(
+    String? raw,
+  ) {
+    final map = _decodeJsMap(raw);
+    if (map == null) return null;
+    return (
+      url: '${map['url'] ?? ''}'.trim(),
+      token: '${map['token'] ?? ''}'.trim(),
+      status: map['status'] is int
+          ? map['status'] as int
+          : int.tryParse('${map['status'] ?? 0}') ?? 0,
+      done: map['done'] == true,
+      diagnostic: '${map['diagnostic'] ?? ''}',
+    );
+  }
+
+  static Map<String, dynamic>? _decodeJsMap(String? raw) {
+    if (raw == null) return null;
+    var s = raw.trim();
+    if (s.isEmpty || s == 'null' || s == 'undefined') return null;
+    for (var i = 0; i < 2 && s.startsWith('"') && s.endsWith('"'); i++) {
+      try {
+        final decoded = jsonDecode(s);
+        if (decoded is! String) break;
+        s = decoded;
+      } catch (_) {
+        break;
+      }
+    }
+    try {
+      final decoded = jsonDecode(s);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
+  }
+
   static ({
     String href,
     bool captcha,
     int activeIndex,
     String activeError,
     String principalId,
+    String liveStreamId,
     Map<String, dynamic>? wsInfo,
     List<({String principalId, List<String> urls})> items,
     List<String> hooked,
@@ -723,6 +1060,7 @@ class KsWebPullPage {
             : int.tryParse('${map['activeIndex'] ?? 0}') ?? 0,
         activeError: '${map['activeError'] ?? ''}',
         principalId: '${map['principalId'] ?? ''}',
+        liveStreamId: '${map['liveStreamId'] ?? ''}',
         wsInfo: map['wsInfo'] is Map
             ? Map<String, dynamic>.from(map['wsInfo'] as Map)
             : null,

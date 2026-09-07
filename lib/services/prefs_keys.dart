@@ -27,4 +27,5 @@ abstract final class PrefsKeys {
   static const ksPullLastMs = 'ks_pull_last_ms';
   static const ksPullCoolUntilMs = 'ks_pull_cool_until_ms';
   static const danmakuEnabled = 'danmaku_enabled';
+  static const randomDouyinEnabled = 'random_douyin_enabled';
 }

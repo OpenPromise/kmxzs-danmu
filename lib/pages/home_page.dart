@@ -20,6 +20,7 @@ import 'package:kmxzs/services/win_shell.dart';
 import 'package:kmxzs/services/danmaku/danmaku_bridge.dart';
 import 'package:kmxzs/services/danmaku/danmaku_client.dart';
 import 'package:kmxzs/services/danmaku/danmaku_message.dart';
+import 'package:kmxzs/services/douyin_random_live.dart';
 import 'package:flutter/services.dart';
 import 'package:kmxzs/app_version.dart';
 import 'package:kmxzs/config/app_config.dart';
@@ -35,6 +36,7 @@ part 'home_page/ks_login_controller.dart';
 part 'home_page/obs_controller.dart';
 part 'home_page/settings_widgets.dart';
 part 'home_page/danmaku_controller.dart';
+part 'home_page/random_douyin_controller.dart';
 
 /// 主页：拉流虚拟摄像机模式。
 class HomePage extends StatefulWidget {
@@ -53,6 +55,7 @@ abstract class _HomePageBase extends State<HomePage> {
   final _obsConfig = OBSConfig();
   final _obsWs = ObsWs();
   final _flvExtractor = FlvExtractor();
+  final _douyinRandomFinder = DouyinRandomLiveFinder();
 
   final _obsPathCtrl = TextEditingController(text: PathFinder.defaultObs);
   final _companionPathCtrl = TextEditingController();
@@ -74,6 +77,9 @@ abstract class _HomePageBase extends State<HomePage> {
   bool _autoClickStartLive = true;
   bool _autoStopOnMediaEnd = true;
   bool _danmakuEnabled = true;
+  bool _randomDouyinEnabled = false;
+  bool _randomDouyinRunning = false;
+  final List<String> _recentRandomDouyinRids = [];
 
   final _pullMonitor = PullMonitorPolicy();
   bool _endStopRunning = false;
@@ -84,6 +90,7 @@ abstract class _HomePageBase extends State<HomePage> {
   Timer? _memTimer;
   Timer? _licenseTimer;
   Timer? _persistDebounce;
+  Timer? _randomDouyinTimer;
   Future<bool>? _licenseInflight;
 
   String? _notice;
@@ -196,6 +203,10 @@ abstract class _HomePageBase extends State<HomePage> {
     await sp.setBool(PrefsKeys.autoClickStartLive, _autoClickStartLive);
     await sp.setBool(PrefsKeys.autoStopOnMediaEnd, _autoStopOnMediaEnd);
     await sp.setBool(PrefsKeys.danmakuEnabled, _danmakuEnabled);
+    await sp.setBool(
+      PrefsKeys.randomDouyinEnabled,
+      AppConfig.randomDouyinFeatureEnabled && _randomDouyinEnabled,
+    );
     final startHotkey = _startHotkeyCtrl.text.trim();
     final endHotkey = _endHotkeyCtrl.text.trim();
     await sp.setString(PrefsKeys.startLiveHotkey, startHotkey);
@@ -289,7 +300,8 @@ class _HomePageState extends _HomePageBase
         _MemController,
         _KuaishouController,
         _DanmakuController,
-        _ObsController {
+        _ObsController,
+        _RandomDouyinController {
   @override
   void initState() {
     super.initState();
@@ -305,6 +317,7 @@ class _HomePageState extends _HomePageBase
     _memTimer?.cancel();
     _licenseTimer?.cancel();
     _persistDebounce?.cancel();
+    _randomDouyinTimer?.cancel();
     unawaited(_stopDanmaku());
     _obsPathCtrl.dispose();
     _companionPathCtrl.dispose();
@@ -353,6 +366,13 @@ class _HomePageState extends _HomePageBase
     _autoClickStartLive = sp.getBool(PrefsKeys.autoClickStartLive) ?? true;
     _autoStopOnMediaEnd = sp.getBool(PrefsKeys.autoStopOnMediaEnd) ?? true;
     await _loadDanmakuPrefs();
+    final savedRandomDouyinEnabled =
+        sp.getBool(PrefsKeys.randomDouyinEnabled) ?? false;
+    _randomDouyinEnabled = AppConfig.randomDouyinFeatureEnabled &&
+        savedRandomDouyinEnabled;
+    if (!AppConfig.randomDouyinFeatureEnabled && savedRandomDouyinEnabled) {
+      await sp.setBool(PrefsKeys.randomDouyinEnabled, false);
+    }
     final kind = _companionKind;
     final rawLegacyHotkey = sp.getString(PrefsKeys.liveHotkey);
     final rawStartHotkey = sp.getString(PrefsKeys.startLiveHotkey);
@@ -415,6 +435,9 @@ class _HomePageState extends _HomePageBase
     }
 
     if (_memOpt) _startMemOpt();
+    if (AppConfig.randomDouyinFeatureEnabled && _randomDouyinEnabled) {
+      _startRandomDouyinTimer(runImmediately: true);
+    }
     if (mounted) setState(() {});
 
     // 首次使用或 OBS 无效 → 登录后引导设置（直播伴侣可在一键开始时再选/跳过）
@@ -429,6 +452,12 @@ class _HomePageState extends _HomePageBase
     final room = _roomUrlCtrl.text.trim();
     if (room.isEmpty) {
       _toast('请先填写直播间链接');
+      return;
+    }
+    final isKuaishou = FlvExtractor.looksLikeKuaishou(room);
+    if (isKuaishou && !_ksLoggedIn) {
+      _appendLog('快手拉流已拦截：请先点击“登录快手账号”完成登录');
+      _toast('快手拉流需要先登录快手账号');
       return;
     }
     if (!await _ensureLicense()) return;
@@ -461,7 +490,7 @@ class _HomePageState extends _HomePageBase
         return;
       }
       late final FlvExtractResult extracted;
-      if (FlvExtractor.looksLikeKuaishou(room)) {
+      if (isKuaishou) {
         if (!mounted) return;
         extracted = await KsWebPullPage.open(
           context,
@@ -501,6 +530,17 @@ class _HomePageState extends _HomePageBase
           fallbacks: candidates.skip(1).toList(),
         ),
       );
+      if (_danmakuClient != null && DanmakuBridge.instance.running) {
+        try {
+          _appendLog(
+            await _obsWs.ensureDanmakuBrowserSource(
+              DanmakuBridge.instance.overlayUrl,
+            ),
+          );
+        } catch (e) {
+          _appendLog('弹幕已连接，但 OBS 弹幕源创建失败: $e');
+        }
+      }
       try {
         _appendLog(await _obsWs.ensureVirtualCamStarted());
       } catch (e) {
@@ -682,6 +722,28 @@ class _HomePageState extends _HomePageBase
                     ),
                   ),
                 ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    _StatusChip(
+                      label: '快手账号',
+                      value: _ksLoggedIn ? '已登录' : '未登录',
+                    ),
+                    const Spacer(),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : () => _loginKuaishouAccount(),
+                      icon: const Icon(Icons.login, size: 18),
+                      label: Text(_ksLoggedIn ? '重新登录快手' : '登录快手账号'),
+                    ),
+                  ],
+                ),
+                if (!_ksLoggedIn) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    '快手拉流和弹幕需要先登录；其他平台不受影响。',
+                    style: TextStyle(fontSize: 12, color: Color(0xFFB45309)),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 SizedBox(
                   height: 48,

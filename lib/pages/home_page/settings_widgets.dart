@@ -252,7 +252,7 @@ class _SettingsPanelState extends State<_SettingsPanel> {
           ),
           SwitchListTile(
             contentPadding: EdgeInsets.zero,
-            title: const Text('自动开关播'),
+            title: const Text('自动开播'),
             value: s._autoClickStartLive,
             onChanged: (v) async {
               setState(() => s._autoClickStartLive = v);
@@ -268,6 +268,18 @@ class _SettingsPanelState extends State<_SettingsPanel> {
               await s._persist();
             },
           ),
+          if (AppConfig.randomDouyinFeatureEnabled)
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('每30分钟随机切换抖音直播'),
+              subtitle: const Text(
+                '在 OBS 顶层添加独立画面，透明度 1% (0.0100)；不替换主画面',
+              ),
+              value: s._randomDouyinEnabled,
+              onChanged: s._randomDouyinRunning
+                  ? null
+                  : (value) => s._setRandomDouyinEnabled(value),
+            ),
           if (s._autoClickStartLive || s._autoStopOnMediaEnd) ...[
             const SizedBox(height: 8),
             Builder(

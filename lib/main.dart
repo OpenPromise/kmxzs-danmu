@@ -7,7 +7,6 @@ import 'package:kmxzs/widgets/about.dart';
 import 'package:kmxzs/pages/login_page.dart';
 import 'package:kmxzs/services/api.dart';
 import 'package:kmxzs/services/auth.dart';
-import 'package:kmxzs/services/guard.dart';
 import 'package:kmxzs/services/native_crypto.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -34,8 +33,6 @@ Future<void> main(List<String> args) async {
   });
 
   NativeCrypto.instance.init('hook.dll');
-  Guard.instance.initStreamCodeShm();
-  Guard.instance.initKmxzsConfigShm();
 
   await AppConfig.load();
   runApp(const KmxzsApp());

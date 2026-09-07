@@ -20,11 +20,13 @@ void main() {
 
     test('live/server 域 web_st 才算是直播站登录态', () {
       expect(
-        FlvExtractor.hasKuaishouLoginCookie('kuaishou.live.web_st=abc; did=web_1'),
+        FlvExtractor.hasKuaishouLoginCookie(
+            'kuaishou.live.web_st=abc; did=web_1'),
         isTrue,
       );
       expect(
-        FlvExtractor.hasKuaishouLoginCookie('kuaishou.server.web_st=abc; did=web_1'),
+        FlvExtractor.hasKuaishouLoginCookie(
+            'kuaishou.server.web_st=abc; did=web_1'),
         isTrue,
       );
       expect(FlvExtractor.hasKuaishouLoginCookie(null), isFalse);
@@ -36,7 +38,8 @@ void main() {
     test('房间号与域名都识别为快手', () {
       expect(FlvExtractor.looksLikeKuaishou('WOT-360-CN'), isTrue);
       expect(
-        FlvExtractor.looksLikeKuaishou('https://live.kuaishou.com/u/WOT-360-CN'),
+        FlvExtractor.looksLikeKuaishou(
+            'https://live.kuaishou.com/u/WOT-360-CN'),
         isTrue,
       );
       expect(FlvExtractor.looksLikeKuaishou('123456'), isFalse);
@@ -67,8 +70,7 @@ void main() {
   group('FlvExtractor.ksLiveStreamChunk', () {
     test('抠出 {"liveStream"...},"gameInfo 并补全括号为合法 JSON', () {
       // gameInfo 是 liveStream 的兄弟键；liveStream 值对象先闭合，外层 `{` 由补的 `}` 闭合
-      const state =
-          '{"liveStream":{"playUrls":{"h264":{"adaptationSet":'
+      const state = '{"liveStream":{"playUrls":{"h264":{"adaptationSet":'
           '{"representation":[{"url":"x"}]}}},"hevc":{}},"gameInfo":{}}';
       final chunk = FlvExtractor.ksLiveStreamChunk(state);
       expect(chunk, isNotNull);
@@ -215,6 +217,47 @@ window.__INITIAL_STATE__={"liveStream":{"errorType":{"title":"操作频繁","con
         extraUrls: [mine],
       );
       expect(urls, [mine]);
+    });
+  });
+
+  group('KsWebPullPage 快手弹幕会话', () {
+    test('从 gifshow 拉流地址提取真实 liveStreamId', () {
+      expect(
+        KsWebPullPage.liveStreamIdFromUrl(
+          'https://tx-origin.pull.yximgs.com/gifshow/'
+          '2SNt9-_ZuKQ_GameAvcFhdL3.flv?auth_key=x',
+        ),
+        '2SNt9-_ZuKQ',
+      );
+    });
+
+    test('优先识别查询参数里的 liveStreamId', () {
+      expect(
+        KsWebPullPage.liveStreamIdFromUrl(
+          'https://example.test/live.flv?liveStreamId=stream-123',
+        ),
+        'stream-123',
+      );
+    });
+
+    test('解析 WebView 返回的双层 JSON 字符串', () {
+      final raw = jsonEncode(
+        jsonEncode({
+          'ok': true,
+          'done': true,
+          'status': 200,
+          'url': 'wss://example.test/websocket',
+          'token': 'secret-token',
+          'diagnostic': 'rest:code=1,keys=result|data',
+        }),
+      );
+      final info = KsWebPullPage.parseWebSocketInfoProbe(raw);
+      expect(info, isNotNull);
+      expect(info!.url, 'wss://example.test/websocket');
+      expect(info.token, 'secret-token');
+      expect(info.status, 200);
+      expect(info.done, isTrue);
+      expect(info.diagnostic, 'rest:code=1,keys=result|data');
     });
   });
 

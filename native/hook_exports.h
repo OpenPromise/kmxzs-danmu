@@ -9,7 +9,8 @@
  *   0x108840 ApiHook  — VirtualProtect inline hook (wininet 等)
  *
  * 无 CreateFileMapping / 无 KSStreamCode / 无 crypto_* 导出。
- * 推流码共享内存由 Dart Guard 维护；抓码主路径是 StreamCodeScanner。
+ * 早期 DLL 注入、进程内存扫码与共享内存抓码路径均已随
+ * 「平台解析 + OBS 拉流」方案下线。
  */
 #pragma once
 

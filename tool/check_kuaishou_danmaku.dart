@@ -5,17 +5,18 @@ import 'package:kmxzs/services/danmaku/kuaishou_danmaku_client.dart';
 
 /// 快手弹幕冒烟：需要从登录后的快手直播间页 __INITIAL_STATE__ 拿到的会话参数。
 /// 用法：
-///   dart run tool/check_kuaishou_danmaku.dart <房间号> <wsUrl> <token> <principalId>
+///   dart run tool/check_kuaishou_danmaku.dart <房间号> <wsUrl> <token> <liveStreamId>
 Future<void> main(List<String> args) async {
   if (args.length < 4) {
-    print('用法: dart run tool/check_kuaishou_danmaku.dart <房间号> <wsUrl> <token> <principalId>');
+    print(
+        '用法: dart run tool/check_kuaishou_danmaku.dart <房间号> <wsUrl> <token> <liveStreamId>');
     return;
   }
   final client = KuaishouDanmakuClient(
     roomId: args[0],
     wsUrl: args[1],
     token: args[2],
-    principalId: args[3],
+    liveStreamId: args[3],
   );
   final sub = client.messages.listen((m) {
     if (m.kind != DanmakuKind.system) {

@@ -48,6 +48,9 @@ class AppConfig {
   static const publisher = '桦中科技';
   static const supportHint = '如遇登录问题，请联系发卡方处理';
 
+  /// 是否向用户开放抖音随机轮播。
+  static const randomDouyinFeatureEnabled = true;
+
   static String? _resolvedBase;
   static bool _loaded = false;
 

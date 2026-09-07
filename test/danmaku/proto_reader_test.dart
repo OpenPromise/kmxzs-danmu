@@ -44,5 +44,32 @@ void main() {
       final msg = PbMessage(raw);
       expect(msg.string(2), 'hi');
     });
+
+    test('截断的定长字段会报告越界', () {
+      expect(
+        () => PbMessage(<int>[0x21, 0x01, 0x02]),
+        throwsA(isA<FormatException>()),
+      );
+      expect(
+        () => PbMessage(<int>[0x2D, 0x01, 0x02]),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('未知 group 字段递归跳过不炸', () {
+      // field 6 start-group，内部含 varint、嵌套 group 和字符串，
+      // 结束后仍应正常读取后续已知字段。
+      final raw = <int>[
+        0x33, // field 6, wire 3
+        0x38, 0x96, 0x01, // field 7, varint 150
+        0x43, // field 8, nested start-group
+        0x4A, 0x02, 0x6F, 0x6B, // field 9, "ok"
+        0x44, // field 8, nested end-group
+        0x34, // field 6, end-group
+        0x12, 0x02, 0x68, 0x69, // field 2, "hi"
+      ];
+      final msg = PbMessage(raw);
+      expect(msg.string(2), 'hi');
+    });
   });
 }
